@@ -15,7 +15,7 @@
 
 import { createConfig } from "@/core/config/config";
 import { AIRegistry } from "@/core/ai/registry";
-import { OllamaProvider } from "@services/ai/ollama-provider";
+import { OllamaProvider } from "@/infrastructure/ai/ollama/provider";
 import { AIGateway } from "@/core/ai/gateway";
 
 // ----------------------------------------------------------------------------
