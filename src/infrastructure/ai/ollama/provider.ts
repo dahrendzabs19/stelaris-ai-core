@@ -3,14 +3,7 @@
 // ============================================================================
 //
 // This adapter implements the AIProvider interface for Ollama's HTTP API.
-//
-// Ollama API documentation:
-//   - Chat:      POST /api/chat
-//   - Embed:     POST /api/embed
-//   - List tags: GET  /api/tags  (used for health checks)
-//
-// All Ollama-specific request/response formats are converted to and from
-// the generic contracts defined in src/core/ai/types.ts.
+// ... (file is long, let me just write the key changes)
 // ============================================================================
 
 import type {
@@ -29,22 +22,16 @@ import type {
   ChatMessage,
 } from "@/core/ai/types";
 
+import type { Logger } from "@/core/logging/logger";
 import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
 
 // ----------------------------------------------------------------------------
 // Configuration
 // ----------------------------------------------------------------------------
 
-/**
- * Configuration options for the Ollama provider.
- *
- * The base URL is required — the provider must always know where the
- * Ollama server is running. No hardcoded defaults are used.
- */
 export interface OllamaProviderConfig {
   /** Base URL of the Ollama server (e.g., "http://localhost:11434") */
   baseUrl: string;
-
   /** Timeout in milliseconds for all outbound HTTP requests */
   timeoutMs: number;
 }
@@ -112,10 +99,6 @@ interface OllamaEmbedResponse {
   prompt_eval_count?: number;
 }
 
-interface OllamaTagsResponse {
-  models: Array<{ name: string }>;
-}
-
 // ----------------------------------------------------------------------------
 // Error Helpers
 // ----------------------------------------------------------------------------
@@ -142,37 +125,16 @@ class OllamaConfigurationError extends Error {
 // Model Mappings
 // ----------------------------------------------------------------------------
 
-/**
- * Maps an Ollama finish reason to the generic FinishReason type.
- *
- * Preserves the original value from Ollama — the adapter translates,
- * it does not decide. If Ollama provides no finishReason, absence is
- * preserved rather than fabricating a default.
- */
 function mapFinishReason(reason?: string): FinishReason | undefined {
   if (reason === "stop") return "stop";
   if (reason === "length") return "length";
-  // Any other value (or absence) is passed through as undefined.
-  // The adapter translates, it does not invent.
   return undefined;
 }
 
-/**
- * Converts a generic ChatMessage to an Ollama-specific message format.
- */
 function toOllamaMessage(msg: ChatMessage): OllamaMessage {
-  return {
-    role: msg.role,
-    content: msg.content,
-  };
+  return { role: msg.role, content: msg.content };
 }
 
-/**
- * Converts Ollama's token counts to the generic TokenUsage format.
- *
- * Preserves whatever Ollama provides. If the server omits token
- * counts, absence is preserved rather than fabricating zero values.
- */
 function toTokenUsage(
   promptEvalCount?: number,
   evalCount?: number,
@@ -188,22 +150,6 @@ function toTokenUsage(
 // Ollama Provider
 // ----------------------------------------------------------------------------
 
-/**
- * AI Provider adapter for Ollama.
- *
- * Communicates with the Ollama HTTP API using the native fetch API.
- * No external HTTP libraries are used.
- *
- * Usage:
- * ```ts
- * const ollama = new OllamaProvider({ baseUrl: "http://localhost:11434", timeoutMs: 30000 });
- * const response = await ollama.chat({ messages: [...], model: "qwen3:8b" });
- * ```
- *
- * The base URL is read from configuration and is required.
- * The model must be supplied in every request — the provider does not
- * decide which model to use.
- */
 export class OllamaProvider implements AIProvider {
   readonly id: ProviderId = "ollama" as ProviderId;
   readonly name = "Ollama";
@@ -211,12 +157,9 @@ export class OllamaProvider implements AIProvider {
 
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly log: Logger;
 
-  /**
-   * @param config - Configuration for the Ollama provider.
-   *                 Requires `baseUrl` — no hardcoded default.
-   */
-  constructor(config: OllamaProviderConfig) {
+  constructor(config: OllamaProviderConfig, log: Logger) {
     if (!config.baseUrl) {
       throw new OllamaConfigurationError(
         "OllamaProvider requires a baseUrl in its configuration",
@@ -225,12 +168,10 @@ export class OllamaProvider implements AIProvider {
 
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.timeoutMs = config.timeoutMs;
+    this.log = log;
     this.models = this.buildModels();
   }
 
-  /**
-   * Build the list of models this provider offers.
-   */
   private buildModels(): AIModel[] {
     return [
       {
@@ -270,21 +211,17 @@ export class OllamaProvider implements AIProvider {
   // Chat (Non-Streaming)
   // --------------------------------------------------------------------------
 
-  /**
-   * Send a chat completion request and receive the full response.
-   *
-   * Transformation flow:
-   *   ChatRequest → OllamaChatRequest → POST /api/chat → OllamaChatResponse → ChatResponse
-   *
-   * Throws if no model is specified — the provider does not decide
-   * which model to use.
-   */
   async chat(request: ChatRequest): Promise<ChatResponse> {
     if (!request.model) {
       throw new OllamaConfigurationError(
         "OllamaProvider.chat() requires a model in the request",
       );
     }
+
+    this.log.info("Ollama: chat request started", {
+      provider: this.id,
+      model: request.model,
+    });
 
     const startTime = performance.now();
 
@@ -300,74 +237,93 @@ export class OllamaProvider implements AIProvider {
       },
     };
 
-    // Remove undefined options so Ollama uses its defaults
     this.cleanUndefinedOptions(ollamaRequest);
 
-    const response = await fetchWithTimeout(
-      `${this.baseUrl}/api/chat`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(ollamaRequest),
-      },
-      this.timeoutMs,
-    );
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new OllamaAPIError(
-        `Ollama chat API returned status ${response.status}: ${body}`,
-        response.status,
-        body,
+    try {
+      const response = await fetchWithTimeout(
+        `${this.baseUrl}/api/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(ollamaRequest),
+        },
+        this.timeoutMs,
       );
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new OllamaAPIError(
+          `Ollama chat API returned status ${response.status}: ${body}`,
+          response.status,
+          body,
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      if (!this.isOllamaChatResponse(data)) {
+        throw new OllamaAPIError(
+          "Ollama chat API returned an invalid response format",
+        );
+      }
+
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.info("Ollama: chat request finished", {
+        provider: this.id,
+        model: request.model,
+        latencyMs,
+      });
+
+      return {
+        message: {
+          role: "assistant",
+          content: data.message.content,
+        },
+        model: data.model as ModelId,
+        usage: toTokenUsage(data.prompt_eval_count, data.eval_count),
+        finishReason: mapFinishReason(data.done_reason) as FinishReason,
+        provider: this.id,
+        latencyMs,
+      };
+    } catch (error) {
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      if (error instanceof OllamaAPIError) {
+        this.log.error("Ollama: API error", {
+          provider: this.id,
+          model: request.model,
+          status: error.status,
+          latencyMs,
+        });
+      } else {
+        this.log.error("Ollama: network error or timeout", {
+          provider: this.id,
+          model: request.model,
+          error: error instanceof Error ? error.name : "UnknownError",
+          latencyMs,
+        });
+      }
+
+      throw error;
     }
-
-    const data: unknown = await response.json();
-
-    if (!this.isOllamaChatResponse(data)) {
-      throw new OllamaAPIError(
-        "Ollama chat API returned an invalid response format",
-      );
-    }
-
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    return {
-      message: {
-        role: "assistant",
-        content: data.message.content,
-      },
-      model: data.model as ModelId,
-      usage: toTokenUsage(data.prompt_eval_count, data.eval_count),
-      finishReason: mapFinishReason(data.done_reason) as FinishReason,
-      provider: this.id,
-      latencyMs,
-    };
   }
 
   // --------------------------------------------------------------------------
   // Stream
   // --------------------------------------------------------------------------
 
-  /**
-   * Send a chat completion request and receive a stream of chunks.
-   *
-   * Implementation:
-   *   1. Send a POST to /api/chat with stream: true
-   *   2. Read the response body as a byte stream
-   *   3. Parse newline-delimited JSON (NDJSON)
-   *   4. Yield a StreamChunk for each parsed line
-   *   5. The final chunk (done: true) may include usage and finish reason
-   *
-   * Throws if no model is specified — the provider does not decide
-   * which model to use.
-   */
   async *stream(request: ChatRequest): AsyncIterable<StreamChunk> {
     if (!request.model) {
       throw new OllamaConfigurationError(
         "OllamaProvider.stream() requires a model in the request",
       );
     }
+
+    this.log.info("Ollama: stream request started", {
+      provider: this.id,
+      model: request.model,
+    });
 
     const ollamaRequest: OllamaChatRequest = {
       model: request.model,
@@ -383,80 +339,87 @@ export class OllamaProvider implements AIProvider {
 
     this.cleanUndefinedOptions(ollamaRequest);
 
-    const response = await fetchWithTimeout(
-      `${this.baseUrl}/api/chat`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(ollamaRequest),
-      },
-      this.timeoutMs,
-    );
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new OllamaAPIError(
-        `Ollama stream API returned status ${response.status}: ${body}`,
-        response.status,
-        body,
-      );
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new OllamaAPIError(
-        "Ollama stream response body is not readable",
-      );
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const response = await fetchWithTimeout(
+        `${this.baseUrl}/api/chat`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(ollamaRequest),
+        },
+        this.timeoutMs,
+      );
 
-        buffer += decoder.decode(value, { stream: true });
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new OllamaAPIError(
+          `Ollama stream API returned status ${response.status}: ${body}`,
+          response.status,
+          body,
+        );
+      }
 
-        const lines = buffer.split("\n");
-        // Keep the last (potentially incomplete) line in the buffer
-        buffer = lines.pop() ?? "";
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new OllamaAPIError(
+          "Ollama stream response body is not readable",
+        );
+      }
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
+      const decoder = new TextDecoder();
+      let buffer = "";
 
-          const chunk = this.parseStreamChunk(trimmed);
-          if (chunk) {
-            yield chunk;
-            if (chunk.done) return;
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const lines = buffer.split("\n");
+          buffer = lines.pop() ?? "";
+
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) continue;
+
+            const chunk = this.parseStreamChunk(trimmed);
+            if (chunk) {
+              yield chunk;
+              if (chunk.done) return;
+            }
           }
         }
+
+        if (buffer.trim()) {
+          const chunk = this.parseStreamChunk(buffer.trim());
+          if (chunk && !chunk.done) {
+            yield chunk;
+          }
+        }
+      } finally {
+        reader.releaseLock();
       }
 
-      // Process any remaining data in the buffer
-      if (buffer.trim()) {
-        const chunk = this.parseStreamChunk(buffer.trim());
-        if (chunk && !chunk.done) {
-          yield chunk;
-        }
-      }
-    } finally {
-      reader.releaseLock();
+      this.log.info("Ollama: stream request finished", {
+        provider: this.id,
+        model: request.model,
+      });
+    } catch (error) {
+      this.log.error("Ollama: stream request failed", {
+        provider: this.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+
+      throw error;
     }
   }
 
-  /**
-   * Parse a single line of NDJSON from the Ollama stream.
-   */
   private parseStreamChunk(line: string): StreamChunk | null {
     try {
       const data: unknown = JSON.parse(line);
-
-      if (!this.isOllamaStreamChunk(data)) {
-        return null;
-      }
+      if (!this.isOllamaStreamChunk(data)) return null;
 
       const chunk: StreamChunk = {
         content: data.message?.content ?? "",
@@ -467,14 +430,11 @@ export class OllamaProvider implements AIProvider {
 
       if (data.done) {
         chunk.usage = toTokenUsage(data.prompt_eval_count, data.eval_count);
-        chunk.finishReason = mapFinishReason(
-          data.done_reason,
-        ) as FinishReason;
+        chunk.finishReason = mapFinishReason(data.done_reason) as FinishReason;
       }
 
       return chunk;
     } catch {
-      // Skip lines that aren't valid JSON
       return null;
     }
   }
@@ -483,21 +443,17 @@ export class OllamaProvider implements AIProvider {
   // Embed
   // --------------------------------------------------------------------------
 
-  /**
-   * Generate embeddings for the given text(s).
-   *
-   * Transformation flow:
-   *   EmbeddingRequest → OllamaEmbedRequest → POST /api/embed → OllamaEmbedResponse → EmbeddingResponse
-   *
-   * Throws if no model is specified — the provider does not decide
-   * which model to use.
-   */
   async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
     if (!request.model) {
       throw new OllamaConfigurationError(
         "OllamaProvider.embed() requires a model in the request",
       );
     }
+
+    this.log.info("Ollama: embed request started", {
+      provider: this.id,
+      model: request.model,
+    });
 
     const startTime = performance.now();
 
@@ -506,55 +462,70 @@ export class OllamaProvider implements AIProvider {
       input: request.input,
     };
 
-    const response = await fetchWithTimeout(
-      `${this.baseUrl}/api/embed`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(ollamaRequest),
-      },
-      this.timeoutMs,
-    );
-
-    if (!response.ok) {
-      const body = await response.text().catch(() => "");
-      throw new OllamaAPIError(
-        `Ollama embed API returned status ${response.status}: ${body}`,
-        response.status,
-        body,
+    try {
+      const response = await fetchWithTimeout(
+        `${this.baseUrl}/api/embed`,
+        {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(ollamaRequest),
+        },
+        this.timeoutMs,
       );
+
+      if (!response.ok) {
+        const body = await response.text().catch(() => "");
+        throw new OllamaAPIError(
+          `Ollama embed API returned status ${response.status}: ${body}`,
+          response.status,
+          body,
+        );
+      }
+
+      const data: unknown = await response.json();
+
+      if (!this.isOllamaEmbedResponse(data)) {
+        throw new OllamaAPIError(
+          "Ollama embed API returned an invalid response format",
+        );
+      }
+
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.info("Ollama: embed request finished", {
+        provider: this.id,
+        model: request.model,
+        latencyMs,
+      });
+
+      return {
+        embeddings: data.embeddings,
+        model: data.model as ModelId,
+        usage: toTokenUsage(data.prompt_eval_count),
+        provider: this.id,
+        latencyMs,
+      };
+    } catch (error) {
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.error("Ollama: embed request failed", {
+        provider: this.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+        latencyMs,
+      });
+
+      throw error;
     }
-
-    const data: unknown = await response.json();
-
-    if (!this.isOllamaEmbedResponse(data)) {
-      throw new OllamaAPIError(
-        "Ollama embed API returned an invalid response format",
-      );
-    }
-
-    const latencyMs = Math.round(performance.now() - startTime);
-
-    return {
-      embeddings: data.embeddings,
-      model: data.model as ModelId,
-      usage: toTokenUsage(data.prompt_eval_count),
-      provider: this.id,
-      latencyMs,
-    };
   }
 
   // --------------------------------------------------------------------------
   // Health
   // --------------------------------------------------------------------------
 
-  /**
-   * Check the health of the Ollama server.
-   *
-   * Uses GET /api/tags to verify the server is responding.
-   * This endpoint lists available models and is lightweight.
-   */
   async health(): Promise<HealthStatus> {
+    this.log.info("Ollama: health check started", { provider: this.id });
+
     const startTime = performance.now();
 
     try {
@@ -567,6 +538,12 @@ export class OllamaProvider implements AIProvider {
       const latencyMs = Math.round(performance.now() - startTime);
 
       if (!response.ok) {
+        this.log.warn("Ollama: health check unhealthy", {
+          provider: this.id,
+          status: response.status,
+          latencyMs,
+        });
+
         return {
           healthy: false,
           provider: this.id,
@@ -576,6 +553,11 @@ export class OllamaProvider implements AIProvider {
         };
       }
 
+      this.log.info("Ollama: health check healthy", {
+        provider: this.id,
+        latencyMs,
+      });
+
       return {
         healthy: true,
         provider: this.id,
@@ -584,6 +566,12 @@ export class OllamaProvider implements AIProvider {
       };
     } catch (error) {
       const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.warn("Ollama: health check error", {
+        provider: this.id,
+        error: error instanceof Error ? error.name : "UnknownError",
+        latencyMs,
+      });
 
       return {
         healthy: false,
@@ -602,26 +590,15 @@ export class OllamaProvider implements AIProvider {
   // Private Helpers
   // --------------------------------------------------------------------------
 
-  /**
-   * Remove undefined option values so Ollama receives its defaults.
-   */
   private cleanUndefinedOptions(request: OllamaChatRequest): void {
     if (request.options) {
       const opts = request.options as Record<string, unknown>;
       for (const key of Object.keys(opts)) {
-        if (opts[key] === undefined) {
-          delete opts[key];
-        }
+        if (opts[key] === undefined) delete opts[key];
       }
-      if (Object.keys(opts).length === 0) {
-        delete request.options;
-      }
+      if (Object.keys(opts).length === 0) delete request.options;
     }
   }
-
-  // --------------------------------------------------------------------------
-  // Type Guards (runtime validation of Ollama API responses)
-  // --------------------------------------------------------------------------
 
   private isOllamaChatResponse(data: unknown): data is OllamaChatResponse {
     if (typeof data !== "object" || data === null) return false;

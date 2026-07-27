@@ -30,6 +30,7 @@ import type {
 } from "@/core/ai/types";
 
 import type { OpenAIConfig } from "@/core/config/config";
+import type { Logger } from "@/core/logging/logger";
 import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
 
 // ----------------------------------------------------------------------------
@@ -228,12 +229,13 @@ export class OpenAIProvider implements AIProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly log: Logger;
 
   /**
    * @param config - Configuration for the OpenAI provider.
    *                 Requires `apiKey` — no hardcoded defaults.
    */
-  constructor(config: OpenAIProviderConfig) {
+  constructor(config: OpenAIProviderConfig, log: Logger) {
     if (!config.apiKey) {
       throw new OpenAIConfigurationError(
         "OpenAIProvider requires an apiKey in its configuration",
@@ -246,6 +248,7 @@ export class OpenAIProvider implements AIProvider {
       "",
     );
     this.timeoutMs = config.timeoutMs;
+    this.log = log;
     this.models = this.buildModels();
   }
 

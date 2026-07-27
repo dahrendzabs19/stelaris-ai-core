@@ -39,6 +39,7 @@ import type {
 
 import { ProviderRouter } from "./provider-router";
 import type { AppConfig } from "../config/config";
+import type { Logger } from "../logging/logger";
 
 // ----------------------------------------------------------------------------
 // Error
@@ -77,7 +78,7 @@ export class GatewayError extends Error {
  * ```ts
  * const config = createConfig();
  * const router = new ProviderRouter(modelRegistry, aiRegistry);
- * const gateway = new AIGateway(config, router);
+ * const gateway = new AIGateway(config, router, logger);
  *
  * const response = await gateway.chat({
  *   model: "qwen3:8b",
@@ -91,14 +92,17 @@ export class GatewayError extends Error {
 export class AIGateway {
   private readonly config: AppConfig;
   private readonly router: ProviderRouter;
+  private readonly log: Logger;
 
   /**
    * @param config - Application configuration (provider settings, etc.)
    * @param router - Provider router that resolves model IDs to AIProvider instances
+   * @param log    - Logger for structured, safe logging
    */
-  constructor(config: AppConfig, router: ProviderRouter) {
+  constructor(config: AppConfig, router: ProviderRouter, log: Logger) {
     this.config = config;
     this.router = router;
+    this.log = log;
   }
 
   // --------------------------------------------------------------------------
@@ -115,11 +119,26 @@ export class AIGateway {
    * @throws {GatewayError} If the provider is not found or the request fails
    */
   async chat(request: ChatRequest): Promise<ChatResponse> {
+    this.log.info("Gateway: chat request received", {
+      model: request.model,
+    });
+
     const provider = this.router.resolve(request.model!);
+
+    this.log.info("Gateway: provider resolved", {
+      provider: provider.id,
+      model: request.model,
+    });
 
     try {
       return await provider.chat(request);
     } catch (error) {
+      this.log.error("Gateway: chat request failed", {
+        provider: provider.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+
       throw new GatewayError(
         `Chat request for model "${request.model}" failed`,
         request.model as unknown as ProviderId,
@@ -144,13 +163,28 @@ export class AIGateway {
    * @throws {GatewayError} If the provider is not found or the stream fails
    */
   async *stream(request: ChatRequest): AsyncIterable<StreamChunk> {
+    this.log.info("Gateway: stream request received", {
+      model: request.model,
+    });
+
     const provider = this.router.resolve(request.model!);
+
+    this.log.info("Gateway: provider resolved for stream", {
+      provider: provider.id,
+      model: request.model,
+    });
 
     try {
       for await (const chunk of provider.stream(request)) {
         yield chunk;
       }
     } catch (error) {
+      this.log.error("Gateway: stream request failed", {
+        provider: provider.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+
       throw new GatewayError(
         `Stream request for model "${request.model}" failed`,
         request.model as unknown as ProviderId,
@@ -173,11 +207,26 @@ export class AIGateway {
    * @throws {GatewayError} If the provider is not found or the request fails
    */
   async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
+    this.log.info("Gateway: embed request received", {
+      model: request.model,
+    });
+
     const provider = this.router.resolve(request.model!);
+
+    this.log.info("Gateway: provider resolved for embed", {
+      provider: provider.id,
+      model: request.model,
+    });
 
     try {
       return await provider.embed(request);
     } catch (error) {
+      this.log.error("Gateway: embed request failed", {
+        provider: provider.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+
       throw new GatewayError(
         `Embed request for model "${request.model}" failed`,
         request.model as unknown as ProviderId,
@@ -198,11 +247,19 @@ export class AIGateway {
    * @throws {GatewayError} If the provider for the given model is not found
    */
   async health(modelId: string): Promise<HealthStatus> {
+    this.log.info("Gateway: health check requested", { model: modelId });
+
     const provider = this.router.resolve(modelId as ModelId);
 
     try {
       return await provider.health();
     } catch (error) {
+      this.log.error("Gateway: health check failed", {
+        provider: provider.id,
+        model: modelId,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+
       throw new GatewayError(
         `Health check for model "${modelId}" failed`,
         modelId as ProviderId,
