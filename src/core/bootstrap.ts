@@ -15,8 +15,11 @@
 
 import { createConfig } from "@/core/config/config";
 import { AIRegistry } from "@/core/ai/registry";
+import { ModelRegistry } from "@/core/ai/model-registry";
+import { ProviderRouter } from "@/core/ai/provider-router";
 import { OllamaProvider } from "@/infrastructure/ai/ollama/provider";
 import { AIGateway } from "@/core/ai/gateway";
+import type { ModelId, ProviderId } from "@/core/ai/types";
 
 // ----------------------------------------------------------------------------
 // 1. Configuration
@@ -35,6 +38,7 @@ const config = createConfig();
 // The registry is a simple catalog. Providers are registered after creation.
 
 const registry = new AIRegistry();
+const models = new ModelRegistry();
 
 // ----------------------------------------------------------------------------
 // 3. Providers
@@ -42,18 +46,31 @@ const registry = new AIRegistry();
 //
 // Providers receive their configuration section and are registered immediately.
 // This is the ONLY place where providers are instantiated and registered.
+// Model-to-provider mappings are also registered here.
 
 const ollama = new OllamaProvider(config.ai.ollama);
 registry.register(ollama);
 
+models.register("qwen3:8b" as ModelId, "ollama" as ProviderId);
+models.register("qwen2.5-coder:7b" as ModelId, "ollama" as ProviderId);
+
 // ----------------------------------------------------------------------------
-// 4. Gateway
+// 4. Router
 // ----------------------------------------------------------------------------
 //
-// The Gateway receives the full config and the populated registry.
-// It orchestrates operations by looking up providers from the registry.
+// The Provider Router combines both registries to resolve model IDs
+// to AIProvider instances.
 
-const gateway = new AIGateway(config, registry);
+const router = new ProviderRouter(models, registry);
+
+// ----------------------------------------------------------------------------
+// 5. Gateway
+// ----------------------------------------------------------------------------
+//
+// The Gateway receives the full config and the router.
+// It resolves providers automatically from the model ID in each request.
+
+const gateway = new AIGateway(config, router);
 
 // ----------------------------------------------------------------------------
 // Exports
@@ -62,4 +79,4 @@ const gateway = new AIGateway(config, registry);
 // Export the wired dependencies so application code (API routes, etc.)
 // can consume them without knowing how they were constructed.
 
-export { config, registry, gateway };
+export { config, registry, models, router, gateway };

@@ -1,5 +1,5 @@
 import { gateway } from "@/core/bootstrap";
-import type { ModelId, ProviderId } from "@/core/ai/types";
+import type { ModelId } from "@/core/ai/types";
 
 // ----------------------------------------------------------------------------
 // Request Validation
@@ -55,14 +55,18 @@ function validateBody(body: unknown): ValidatedChatRequest {
  *   2. Validation — ensure the payload is well-formed
  *   3. Serialization — convert ChatResponse back to HTTP JSON
  *
- * All AI behavior is delegated to the AI Core (Gateway → Registry → Provider).
+ * All AI behavior is delegated to the AI Core (Gateway → Router → Provider).
+ *
+ * The provider is determined automatically from the model ID.
+ * The route no longer specifies a provider — the ModelRegistry and
+ * ProviderRouter handle resolution based on the model in the request.
  */
 export async function POST(request: Request) {
   try {
     const body: unknown = await request.json();
     const { prompt, model } = validateBody(body);
 
-    const response = await gateway.chat("ollama" as ProviderId, {
+    const response = await gateway.chat({
       model: model as ModelId | undefined,
       messages: [
         {
