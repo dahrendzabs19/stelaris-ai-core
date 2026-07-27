@@ -25,6 +25,7 @@ const ENV = {
   OPENAI_API_KEY: "OPENAI_API_KEY",
   CLAUDE_API_KEY: "CLAUDE_API_KEY",
   GEMINI_API_KEY: "GEMINI_API_KEY",
+  AI_TIMEOUT_MS: "AI_TIMEOUT_MS",
 } as const;
 
 // ----------------------------------------------------------------------------
@@ -79,6 +80,8 @@ export interface GeminiConfig {
  * Providers without an active integration simply have empty config objects.
  */
 export interface AIConfig {
+  /** Timeout in milliseconds for all outbound AI HTTP requests */
+  readonly timeoutMs: number;
   readonly ollama: OllamaConfig;
   readonly openai: OpenAIConfig;
   readonly claude: ClaudeConfig;
@@ -115,8 +118,14 @@ export function createConfig(): AppConfig {
     "OLLAMA_BASE_URL is required. Set it to the URL of your Ollama server (e.g., http://localhost:11434).",
   );
 
+  const timeoutMs = readOptionalNumber(
+    ENV.AI_TIMEOUT_MS,
+    30000,
+  );
+
   const config: AppConfig = {
     ai: {
+      timeoutMs,
       ollama: {
         baseUrl: ollamaBaseUrl,
       },
@@ -173,6 +182,29 @@ function readRequired(name: string, hint: string): string {
   }
 
   return value.trim();
+}
+
+/**
+ * Read an optional numeric environment variable with a fallback.
+ *
+ * If the variable is not set, empty, or not a valid positive integer,
+ * the default value is returned. This allows configuration to have
+ * sensible defaults that can be overridden via environment.
+ */
+function readOptionalNumber(name: string, fallback: number): number {
+  const value = process.env[name];
+
+  if (value === undefined || value === null || value.trim() === "") {
+    return fallback;
+  }
+
+  const parsed = Number(value.trim());
+
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return fallback;
+  }
+
+  return parsed;
 }
 
 /**

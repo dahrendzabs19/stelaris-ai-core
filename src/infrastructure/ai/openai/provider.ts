@@ -30,6 +30,7 @@ import type {
 } from "@/core/ai/types";
 
 import type { OpenAIConfig } from "@/core/config/config";
+import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
 
 // ----------------------------------------------------------------------------
 // Configuration
@@ -44,6 +45,9 @@ import type { OpenAIConfig } from "@/core/config/config";
 export interface OpenAIProviderConfig extends OpenAIConfig {
   /** Base URL of the OpenAI API (defaults to "https://api.openai.com/v1") */
   baseUrl?: string;
+
+  /** Timeout in milliseconds for all outbound HTTP requests */
+  timeoutMs: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -207,7 +211,7 @@ function toTokenUsage(usage: OpenAIUsage): TokenUsage {
  *
  * Usage:
  * ```ts
- * const openai = new OpenAIProvider({ apiKey: "sk-..." });
+ * const openai = new OpenAIProvider({ apiKey: "sk-...", timeoutMs: 30000 });
  * const response = await openai.chat({
  *   model: "gpt-4o",
  *   messages: [{ role: "user", content: "Hello" }],
@@ -223,6 +227,7 @@ export class OpenAIProvider implements AIProvider {
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
+  private readonly timeoutMs: number;
 
   /**
    * @param config - Configuration for the OpenAI provider.
@@ -240,8 +245,15 @@ export class OpenAIProvider implements AIProvider {
       /\/+$/,
       "",
     );
+    this.timeoutMs = config.timeoutMs;
+    this.models = this.buildModels();
+  }
 
-    this.models = [
+  /**
+   * Build the list of models this provider offers.
+   */
+  private buildModels(): AIModel[] {
+    return [
       {
         id: "gpt-4o" as ModelId,
         name: "GPT-4o",
@@ -303,38 +315,6 @@ export class OpenAIProvider implements AIProvider {
         qualityScore: 0.9,
       },
     ];
-  }
-
-  // --------------------------------------------------------------------------
-  // HTTP Helper
-  // --------------------------------------------------------------------------
-
-  /**
-   * Make an authenticated request to the OpenAI API.
-   */
-  private async fetchOpenAI<T>(
-    path: string,
-    body: unknown,
-  ): Promise<T> {
-    const response = await fetch(`${this.baseUrl}${path}`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
-      },
-      body: JSON.stringify(body),
-    });
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new OpenAIAPIError(
-        `OpenAI API returned status ${response.status}: ${text}`,
-        response.status,
-        text,
-      );
-    }
-
-    return response.json() as Promise<T>;
   }
 
   // --------------------------------------------------------------------------
@@ -420,14 +400,18 @@ export class OpenAIProvider implements AIProvider {
       max_tokens: request.maxTokens,
     };
 
-    const response = await fetch(`${this.baseUrl}/chat/completions`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${this.apiKey}`,
+    const response = await fetchWithTimeout(
+      `${this.baseUrl}/chat/completions`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(openaiRequest),
       },
-      body: JSON.stringify(openaiRequest),
-    });
+      this.timeoutMs,
+    );
 
     if (!response.ok) {
       const text = await response.text().catch(() => "");
@@ -596,12 +580,16 @@ export class OpenAIProvider implements AIProvider {
     const startTime = performance.now();
 
     try {
-      const response = await fetch(`${this.baseUrl}/models`, {
-        method: "GET",
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
+      const response = await fetchWithTimeout(
+        `${this.baseUrl}/models`,
+        {
+          method: "GET",
+          headers: {
+            Authorization: `Bearer ${this.apiKey}`,
+          },
         },
-      });
+        this.timeoutMs,
+      );
 
       const latencyMs = Math.round(performance.now() - startTime);
 
@@ -635,6 +623,42 @@ export class OpenAIProvider implements AIProvider {
         latencyMs,
       };
     }
+  }
+
+  // --------------------------------------------------------------------------
+  // Private Helpers
+  // --------------------------------------------------------------------------
+
+  /**
+   * Make an authenticated request to the OpenAI API with timeout.
+   */
+  private async fetchOpenAI<T>(
+    path: string,
+    body: unknown,
+  ): Promise<T> {
+    const response = await fetchWithTimeout(
+      `${this.baseUrl}${path}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${this.apiKey}`,
+        },
+        body: JSON.stringify(body),
+      },
+      this.timeoutMs,
+    );
+
+    if (!response.ok) {
+      const text = await response.text().catch(() => "");
+      throw new OpenAIAPIError(
+        `OpenAI API returned status ${response.status}: ${text}`,
+        response.status,
+        text,
+      );
+    }
+
+    return response.json() as Promise<T>;
   }
 
   // --------------------------------------------------------------------------

@@ -29,6 +29,8 @@ import type {
   ChatMessage,
 } from "@/core/ai/types";
 
+import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
+
 // ----------------------------------------------------------------------------
 // Configuration
 // ----------------------------------------------------------------------------
@@ -42,6 +44,9 @@ import type {
 export interface OllamaProviderConfig {
   /** Base URL of the Ollama server (e.g., "http://localhost:11434") */
   baseUrl: string;
+
+  /** Timeout in milliseconds for all outbound HTTP requests */
+  timeoutMs: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -191,7 +196,7 @@ function toTokenUsage(
  *
  * Usage:
  * ```ts
- * const ollama = new OllamaProvider({ baseUrl: "http://localhost:11434" });
+ * const ollama = new OllamaProvider({ baseUrl: "http://localhost:11434", timeoutMs: 30000 });
  * const response = await ollama.chat({ messages: [...], model: "qwen3:8b" });
  * ```
  *
@@ -205,6 +210,7 @@ export class OllamaProvider implements AIProvider {
   readonly models: AIModel[];
 
   private readonly baseUrl: string;
+  private readonly timeoutMs: number;
 
   /**
    * @param config - Configuration for the Ollama provider.
@@ -218,8 +224,15 @@ export class OllamaProvider implements AIProvider {
     }
 
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
+    this.timeoutMs = config.timeoutMs;
+    this.models = this.buildModels();
+  }
 
-    this.models = [
+  /**
+   * Build the list of models this provider offers.
+   */
+  private buildModels(): AIModel[] {
+    return [
       {
         id: "qwen3:8b" as ModelId,
         name: "Qwen 3 8B",
@@ -290,11 +303,15 @@ export class OllamaProvider implements AIProvider {
     // Remove undefined options so Ollama uses its defaults
     this.cleanUndefinedOptions(ollamaRequest);
 
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ollamaRequest),
-    });
+    const response = await fetchWithTimeout(
+      `${this.baseUrl}/api/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ollamaRequest),
+      },
+      this.timeoutMs,
+    );
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
@@ -366,11 +383,15 @@ export class OllamaProvider implements AIProvider {
 
     this.cleanUndefinedOptions(ollamaRequest);
 
-    const response = await fetch(`${this.baseUrl}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ollamaRequest),
-    });
+    const response = await fetchWithTimeout(
+      `${this.baseUrl}/api/chat`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ollamaRequest),
+      },
+      this.timeoutMs,
+    );
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
@@ -485,11 +506,15 @@ export class OllamaProvider implements AIProvider {
       input: request.input,
     };
 
-    const response = await fetch(`${this.baseUrl}/api/embed`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(ollamaRequest),
-    });
+    const response = await fetchWithTimeout(
+      `${this.baseUrl}/api/embed`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(ollamaRequest),
+      },
+      this.timeoutMs,
+    );
 
     if (!response.ok) {
       const body = await response.text().catch(() => "");
@@ -533,9 +558,11 @@ export class OllamaProvider implements AIProvider {
     const startTime = performance.now();
 
     try {
-      const response = await fetch(`${this.baseUrl}/api/tags`, {
-        method: "GET",
-      });
+      const response = await fetchWithTimeout(
+        `${this.baseUrl}/api/tags`,
+        { method: "GET" },
+        this.timeoutMs,
+      );
 
       const latencyMs = Math.round(performance.now() - startTime);
 

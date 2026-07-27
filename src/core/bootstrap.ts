@@ -48,7 +48,10 @@ const models = new ModelRegistry();
 // This is the ONLY place where providers are instantiated and registered.
 // Model-to-provider mappings are also registered here.
 
-const ollama = new OllamaProvider(config.ai.ollama);
+const ollama = new OllamaProvider({
+  ...config.ai.ollama,
+  timeoutMs: config.ai.timeoutMs,
+});
 registry.register(ollama);
 
 models.register("qwen3:8b" as ModelId, "ollama" as ProviderId);
