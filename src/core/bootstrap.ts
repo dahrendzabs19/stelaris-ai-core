@@ -63,6 +63,7 @@ const ollama = new OllamaProvider(
   {
     ...config.ai.ollama,
     timeoutMs: config.ai.timeoutMs,
+    retryCount: config.ai.retryCount,
   },
   log,
 );

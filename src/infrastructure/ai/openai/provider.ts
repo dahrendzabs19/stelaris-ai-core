@@ -31,7 +31,7 @@ import type {
 
 import type { OpenAIConfig } from "@/core/config/config";
 import type { Logger } from "@/core/logging/logger";
-import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
+import { fetchWithRetry } from "@/infrastructure/http/fetch-with-retry";
 
 // ----------------------------------------------------------------------------
 // Configuration
@@ -46,9 +46,10 @@ import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
 export interface OpenAIProviderConfig extends OpenAIConfig {
   /** Base URL of the OpenAI API (defaults to "https://api.openai.com/v1") */
   baseUrl?: string;
-
   /** Timeout in milliseconds for all outbound HTTP requests */
   timeoutMs: number;
+  /** Maximum number of retries for transient failures */
+  retryCount: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -131,11 +132,6 @@ interface OpenAIEmbedResponse {
   };
 }
 
-interface OpenAIModelListResponse {
-  object: string;
-  data: Array<{ id: string; object: string }>;
-}
-
 // ----------------------------------------------------------------------------
 // Error Helpers
 // ----------------------------------------------------------------------------
@@ -162,25 +158,14 @@ class OpenAIConfigurationError extends Error {
 // Model Mappings
 // ----------------------------------------------------------------------------
 
-/**
- * Maps an OpenAI finish reason to the generic FinishReason type.
- *
- * OpenAI uses underscore-separated reason strings; the generic type
- * uses hyphens. This function translates between the two formats.
- */
 function mapFinishReason(reason: string | null | undefined): FinishReason {
   if (reason === "stop") return "stop";
   if (reason === "length") return "length";
-  // OpenAI uses "tool_calls" (underscore), generic type uses "tool-calls" (hyphen)
   if (reason === "tool_calls") return "tool-calls";
-  // OpenAI uses "content_filter" (underscore), generic type uses "content-filter" (hyphen)
   if (reason === "content_filter") return "content-filter";
   return "stop";
 }
 
-/**
- * Converts a generic ChatMessage to an OpenAI-specific message format.
- */
 function toOpenAIMessage(msg: ChatMessage): OpenAIMessage {
   return {
     role: msg.role,
@@ -189,9 +174,6 @@ function toOpenAIMessage(msg: ChatMessage): OpenAIMessage {
   };
 }
 
-/**
- * Converts OpenAI's token usage to the generic TokenUsage format.
- */
 function toTokenUsage(usage: OpenAIUsage): TokenUsage {
   return {
     inputTokens: usage.prompt_tokens,
@@ -204,23 +186,6 @@ function toTokenUsage(usage: OpenAIUsage): TokenUsage {
 // OpenAI Provider
 // ----------------------------------------------------------------------------
 
-/**
- * AI Provider adapter for OpenAI.
- *
- * Communicates with the OpenAI REST API using the native fetch API.
- * No SDK or external dependencies are used.
- *
- * Usage:
- * ```ts
- * const openai = new OpenAIProvider({ apiKey: "sk-...", timeoutMs: 30000 });
- * const response = await openai.chat({
- *   model: "gpt-4o",
- *   messages: [{ role: "user", content: "Hello" }],
- * });
- * ```
- *
- * The API key and model must be supplied — no hardcoded defaults.
- */
 export class OpenAIProvider implements AIProvider {
   readonly id: ProviderId = "openai" as ProviderId;
   readonly name = "OpenAI";
@@ -229,12 +194,9 @@ export class OpenAIProvider implements AIProvider {
   private readonly apiKey: string;
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly retryCount: number;
   private readonly log: Logger;
 
-  /**
-   * @param config - Configuration for the OpenAI provider.
-   *                 Requires `apiKey` — no hardcoded defaults.
-   */
   constructor(config: OpenAIProviderConfig, log: Logger) {
     if (!config.apiKey) {
       throw new OpenAIConfigurationError(
@@ -248,13 +210,11 @@ export class OpenAIProvider implements AIProvider {
       "",
     );
     this.timeoutMs = config.timeoutMs;
+    this.retryCount = config.retryCount;
     this.log = log;
     this.models = this.buildModels();
   }
 
-  /**
-   * Build the list of models this provider offers.
-   */
   private buildModels(): AIModel[] {
     return [
       {
@@ -324,19 +284,17 @@ export class OpenAIProvider implements AIProvider {
   // Chat (Non-Streaming)
   // --------------------------------------------------------------------------
 
-  /**
-   * Send a chat completion request and receive the full response.
-   *
-   * Transformation flow:
-   *   ChatRequest → OpenAIChatRequest → POST /v1/chat/completions
-   *   → OpenAIChatResponse → ChatResponse
-   */
   async chat(request: ChatRequest): Promise<ChatResponse> {
     if (!request.model) {
       throw new OpenAIConfigurationError(
         "OpenAIProvider.chat() requires a model in the request",
       );
     }
+
+    this.log.info("OpenAI: chat request started", {
+      provider: this.id,
+      model: request.model,
+    });
 
     const startTime = performance.now();
 
@@ -350,48 +308,63 @@ export class OpenAIProvider implements AIProvider {
       max_tokens: request.maxTokens,
     };
 
-    const data = await this.fetchOpenAI<OpenAIChatResponse>(
-      "/chat/completions",
-      openaiRequest,
-    );
+    try {
+      const data = await this.fetchOpenAI<OpenAIChatResponse>(
+        "/chat/completions",
+        openaiRequest,
+        request.model,
+      );
 
-    const latencyMs = Math.round(performance.now() - startTime);
+      const latencyMs = Math.round(performance.now() - startTime);
 
-    const choice = data.choices[0];
+      const choice = data.choices[0];
 
-    return {
-      message: {
-        role: "assistant",
-        content: choice.message.content,
-      },
-      model: data.model as ModelId,
-      usage: toTokenUsage(data.usage),
-      finishReason: mapFinishReason(choice.finish_reason),
-      provider: this.id,
-      latencyMs,
-    };
+      this.log.info("OpenAI: chat request finished", {
+        provider: this.id,
+        model: request.model,
+        latencyMs,
+      });
+
+      return {
+        message: {
+          role: "assistant",
+          content: choice.message.content,
+        },
+        model: data.model as ModelId,
+        usage: toTokenUsage(data.usage),
+        finishReason: mapFinishReason(choice.finish_reason),
+        provider: this.id,
+        latencyMs,
+      };
+    } catch (error) {
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.error("OpenAI: chat request failed", {
+        provider: this.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+        latencyMs,
+      });
+
+      throw error;
+    }
   }
 
   // --------------------------------------------------------------------------
   // Stream
   // --------------------------------------------------------------------------
 
-  /**
-   * Send a chat completion request and receive a stream of chunks.
-   *
-   * Implementation:
-   *   1. Send a POST to /v1/chat/completions with stream: true
-   *   2. Read the response body as a byte stream
-   *   3. Parse Server-Sent Events (SSE) — lines prefixed with "data: "
-   *   4. Yield a StreamChunk for each parsed JSON payload
-   *   5. The final chunk (usage/finish_reason) ends the stream
-   */
   async *stream(request: ChatRequest): AsyncIterable<StreamChunk> {
     if (!request.model) {
       throw new OpenAIConfigurationError(
         "OpenAIProvider.stream() requires a model in the request",
       );
     }
+
+    this.log.info("OpenAI: stream request started", {
+      provider: this.id,
+      model: request.model,
+    });
 
     const openaiRequest: OpenAIChatRequest = {
       model: request.model,
@@ -403,96 +376,106 @@ export class OpenAIProvider implements AIProvider {
       max_tokens: request.maxTokens,
     };
 
-    const response = await fetchWithTimeout(
-      `${this.baseUrl}/chat/completions`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-        body: JSON.stringify(openaiRequest),
-      },
-      this.timeoutMs,
-    );
-
-    if (!response.ok) {
-      const text = await response.text().catch(() => "");
-      throw new OpenAIAPIError(
-        `OpenAI stream API returned status ${response.status}: ${text}`,
-        response.status,
-        text,
-      );
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      throw new OpenAIAPIError(
-        "OpenAI stream response body is not readable",
-      );
-    }
-
-    const decoder = new TextDecoder();
-    let buffer = "";
-
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
+      const response = await fetchWithRetry(
+        `${this.baseUrl}/chat/completions`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${this.apiKey}`,
+          },
+          body: JSON.stringify(openaiRequest),
+        },
+        this.timeoutMs,
+        this.retryCount,
+        this.log,
+        { provider: this.id, model: request.model },
+      );
 
-        buffer += decoder.decode(value, { stream: true });
-
-        // SSE events are delimited by double newlines
-        const parts = buffer.split("\n\n");
-        buffer = parts.pop() ?? "";
-
-        for (const part of parts) {
-          const line = part.trim();
-          if (!line || !line.startsWith("data: ")) continue;
-
-          const payload = line.slice(6);
-
-          // OpenAI signals stream end with "data: [DONE]"
-          if (payload === "[DONE]") {
-            return;
-          }
-
-          const chunk = this.parseStreamChunk(payload);
-          if (chunk) {
-            yield chunk;
-            if (chunk.done) return;
-          }
-        }
+      if (!response.ok) {
+        const text = await response.text().catch(() => "");
+        throw new OpenAIAPIError(
+          `OpenAI stream API returned status ${response.status}: ${text}`,
+          response.status,
+          text,
+        );
       }
 
-      // Process any remaining data in the buffer
-      if (buffer.trim()) {
-        const line = buffer.trim();
-        if (line.startsWith("data: ")) {
-          const payload = line.slice(6);
-          if (payload !== "[DONE]") {
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new OpenAIAPIError(
+          "OpenAI stream response body is not readable",
+        );
+      }
+
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() ?? "";
+
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line || !line.startsWith("data: ")) continue;
+
+            const payload = line.slice(6);
+
+            if (payload === "[DONE]") {
+              return;
+            }
+
             const chunk = this.parseStreamChunk(payload);
-            if (chunk && !chunk.done) {
+            if (chunk) {
               yield chunk;
+              if (chunk.done) return;
             }
           }
         }
+
+        if (buffer.trim()) {
+          const line = buffer.trim();
+          if (line.startsWith("data: ")) {
+            const payload = line.slice(6);
+            if (payload !== "[DONE]") {
+              const chunk = this.parseStreamChunk(payload);
+              if (chunk && !chunk.done) {
+                yield chunk;
+              }
+            }
+          }
+        }
+      } finally {
+        reader.releaseLock();
       }
-    } finally {
-      reader.releaseLock();
+
+      this.log.info("OpenAI: stream request finished", {
+        provider: this.id,
+        model: request.model,
+      });
+    } catch (error) {
+      this.log.error("OpenAI: stream request failed", {
+        provider: this.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+      });
+
+      throw error;
     }
   }
 
-  /**
-   * Parse a single SSE data payload from the OpenAI stream.
-   */
   private parseStreamChunk(payload: string): StreamChunk | null {
     try {
       const data: unknown = JSON.parse(payload);
 
-      if (!this.isOpenAIStreamChunk(data)) {
-        return null;
-      }
+      if (!this.isOpenAIStreamChunk(data)) return null;
 
       const choice = data.choices[0];
 
@@ -503,8 +486,6 @@ export class OpenAIProvider implements AIProvider {
         done: false,
       };
 
-      // The final chunk may optionally carry usage data.
-      // If finish_reason is non-null, this is the last chunk.
       if (choice?.finish_reason) {
         chunk.done = true;
         chunk.finishReason = mapFinishReason(choice.finish_reason);
@@ -516,7 +497,6 @@ export class OpenAIProvider implements AIProvider {
 
       return chunk;
     } catch {
-      // Skip malformed JSON payloads
       return null;
     }
   }
@@ -525,19 +505,17 @@ export class OpenAIProvider implements AIProvider {
   // Embed
   // --------------------------------------------------------------------------
 
-  /**
-   * Generate embeddings for the given text(s).
-   *
-   * Transformation flow:
-   *   EmbeddingRequest → OpenAIEmbedRequest → POST /v1/embeddings
-   *   → OpenAIEmbedResponse → EmbeddingResponse
-   */
   async embed(request: EmbeddingRequest): Promise<EmbeddingResponse> {
     if (!request.model) {
       throw new OpenAIConfigurationError(
         "OpenAIProvider.embed() requires a model in the request",
       );
     }
+
+    this.log.info("OpenAI: embed request started", {
+      provider: this.id,
+      model: request.model,
+    });
 
     const startTime = performance.now();
 
@@ -546,44 +524,59 @@ export class OpenAIProvider implements AIProvider {
       model: request.model,
     };
 
-    const data = await this.fetchOpenAI<OpenAIEmbedResponse>(
-      "/embeddings",
-      openaiRequest,
-    );
+    try {
+      const data = await this.fetchOpenAI<OpenAIEmbedResponse>(
+        "/embeddings",
+        openaiRequest,
+        request.model,
+      );
 
-    const latencyMs = Math.round(performance.now() - startTime);
+      const latencyMs = Math.round(performance.now() - startTime);
 
-    // OpenAI returns embeddings ordered by index — sort to ensure correct order
-    const sorted = [...data.data].sort((a, b) => a.index - b.index);
+      const sorted = [...data.data].sort((a, b) => a.index - b.index);
 
-    return {
-      embeddings: sorted.map((e) => e.embedding),
-      model: data.model as ModelId,
-      usage: {
-        inputTokens: data.usage.prompt_tokens,
-        outputTokens: 0,
-        totalTokens: data.usage.total_tokens,
-      },
-      provider: this.id,
-      latencyMs,
-    };
+      this.log.info("OpenAI: embed request finished", {
+        provider: this.id,
+        model: request.model,
+        latencyMs,
+      });
+
+      return {
+        embeddings: sorted.map((e) => e.embedding),
+        model: data.model as ModelId,
+        usage: {
+          inputTokens: data.usage.prompt_tokens,
+          outputTokens: 0,
+          totalTokens: data.usage.total_tokens,
+        },
+        provider: this.id,
+        latencyMs,
+      };
+    } catch (error) {
+      const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.error("OpenAI: embed request failed", {
+        provider: this.id,
+        model: request.model,
+        error: error instanceof Error ? error.name : "UnknownError",
+        latencyMs,
+      });
+
+      throw error;
+    }
   }
 
   // --------------------------------------------------------------------------
   // Health
   // --------------------------------------------------------------------------
 
-  /**
-   * Check the health of the OpenAI API.
-   *
-   * Uses GET /v1/models to verify the API key is valid and the API is
-   * reachable. A successful response means credentials are valid.
-   */
   async health(): Promise<HealthStatus> {
+    this.log.info("OpenAI: health check started", { provider: this.id });
+
     const startTime = performance.now();
 
     try {
-      const response = await fetchWithTimeout(
+      const response = await fetchWithRetry(
         `${this.baseUrl}/models`,
         {
           method: "GET",
@@ -592,11 +585,20 @@ export class OpenAIProvider implements AIProvider {
           },
         },
         this.timeoutMs,
+        this.retryCount,
+        this.log,
+        { provider: this.id },
       );
 
       const latencyMs = Math.round(performance.now() - startTime);
 
       if (!response.ok) {
+        this.log.warn("OpenAI: health check unhealthy", {
+          provider: this.id,
+          status: response.status,
+          latencyMs,
+        });
+
         return {
           healthy: false,
           provider: this.id,
@@ -606,6 +608,11 @@ export class OpenAIProvider implements AIProvider {
         };
       }
 
+      this.log.info("OpenAI: health check healthy", {
+        provider: this.id,
+        latencyMs,
+      });
+
       return {
         healthy: true,
         provider: this.id,
@@ -614,6 +621,12 @@ export class OpenAIProvider implements AIProvider {
       };
     } catch (error) {
       const latencyMs = Math.round(performance.now() - startTime);
+
+      this.log.warn("OpenAI: health check error", {
+        provider: this.id,
+        error: error instanceof Error ? error.name : "UnknownError",
+        latencyMs,
+      });
 
       return {
         healthy: false,
@@ -632,14 +645,12 @@ export class OpenAIProvider implements AIProvider {
   // Private Helpers
   // --------------------------------------------------------------------------
 
-  /**
-   * Make an authenticated request to the OpenAI API with timeout.
-   */
   private async fetchOpenAI<T>(
     path: string,
     body: unknown,
+    model: string,
   ): Promise<T> {
-    const response = await fetchWithTimeout(
+    const response = await fetchWithRetry(
       `${this.baseUrl}${path}`,
       {
         method: "POST",
@@ -650,6 +661,9 @@ export class OpenAIProvider implements AIProvider {
         body: JSON.stringify(body),
       },
       this.timeoutMs,
+      this.retryCount,
+      this.log,
+      { provider: this.id, model },
     );
 
     if (!response.ok) {
@@ -665,7 +679,7 @@ export class OpenAIProvider implements AIProvider {
   }
 
   // --------------------------------------------------------------------------
-  // Type Guards (runtime validation of OpenAI API responses)
+  // Type Guards
   // --------------------------------------------------------------------------
 
   private isOpenAIStreamChunk(data: unknown): data is OpenAIStreamChunk {

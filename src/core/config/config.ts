@@ -26,6 +26,7 @@ const ENV = {
   CLAUDE_API_KEY: "CLAUDE_API_KEY",
   GEMINI_API_KEY: "GEMINI_API_KEY",
   AI_TIMEOUT_MS: "AI_TIMEOUT_MS",
+  AI_RETRY_COUNT: "AI_RETRY_COUNT",
 } as const;
 
 // ----------------------------------------------------------------------------
@@ -82,6 +83,8 @@ export interface GeminiConfig {
 export interface AIConfig {
   /** Timeout in milliseconds for all outbound AI HTTP requests */
   readonly timeoutMs: number;
+  /** Maximum number of retries for transient failures (0 = no retries) */
+  readonly retryCount: number;
   readonly ollama: OllamaConfig;
   readonly openai: OpenAIConfig;
   readonly claude: ClaudeConfig;
@@ -123,9 +126,15 @@ export function createConfig(): AppConfig {
     30000,
   );
 
+  const retryCount = readOptionalNumber(
+    ENV.AI_RETRY_COUNT,
+    2,
+  );
+
   const config: AppConfig = {
     ai: {
       timeoutMs,
+      retryCount,
       ollama: {
         baseUrl: ollamaBaseUrl,
       },

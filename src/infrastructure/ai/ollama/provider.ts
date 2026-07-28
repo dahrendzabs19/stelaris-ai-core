@@ -3,7 +3,14 @@
 // ============================================================================
 //
 // This adapter implements the AIProvider interface for Ollama's HTTP API.
-// ... (file is long, let me just write the key changes)
+//
+// Ollama API documentation:
+//   - Chat:      POST /api/chat
+//   - Embed:     POST /api/embed
+//   - List tags: GET  /api/tags  (used for health checks)
+//
+// All Ollama-specific request/response formats are converted to and from
+// the generic contracts defined in src/core/ai/types.ts.
 // ============================================================================
 
 import type {
@@ -23,7 +30,7 @@ import type {
 } from "@/core/ai/types";
 
 import type { Logger } from "@/core/logging/logger";
-import { fetchWithTimeout } from "@/infrastructure/http/fetch-with-timeout";
+import { fetchWithRetry } from "@/infrastructure/http/fetch-with-retry";
 
 // ----------------------------------------------------------------------------
 // Configuration
@@ -34,6 +41,8 @@ export interface OllamaProviderConfig {
   baseUrl: string;
   /** Timeout in milliseconds for all outbound HTTP requests */
   timeoutMs: number;
+  /** Maximum number of retries for transient failures */
+  retryCount: number;
 }
 
 // ----------------------------------------------------------------------------
@@ -157,6 +166,7 @@ export class OllamaProvider implements AIProvider {
 
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
+  private readonly retryCount: number;
   private readonly log: Logger;
 
   constructor(config: OllamaProviderConfig, log: Logger) {
@@ -168,6 +178,7 @@ export class OllamaProvider implements AIProvider {
 
     this.baseUrl = config.baseUrl.replace(/\/+$/, "");
     this.timeoutMs = config.timeoutMs;
+    this.retryCount = config.retryCount;
     this.log = log;
     this.models = this.buildModels();
   }
@@ -240,7 +251,7 @@ export class OllamaProvider implements AIProvider {
     this.cleanUndefinedOptions(ollamaRequest);
 
     try {
-      const response = await fetchWithTimeout(
+      const response = await fetchWithRetry(
         `${this.baseUrl}/api/chat`,
         {
           method: "POST",
@@ -248,6 +259,9 @@ export class OllamaProvider implements AIProvider {
           body: JSON.stringify(ollamaRequest),
         },
         this.timeoutMs,
+        this.retryCount,
+        this.log,
+        { provider: this.id, model: request.model },
       );
 
       if (!response.ok) {
@@ -340,7 +354,7 @@ export class OllamaProvider implements AIProvider {
     this.cleanUndefinedOptions(ollamaRequest);
 
     try {
-      const response = await fetchWithTimeout(
+      const response = await fetchWithRetry(
         `${this.baseUrl}/api/chat`,
         {
           method: "POST",
@@ -348,6 +362,9 @@ export class OllamaProvider implements AIProvider {
           body: JSON.stringify(ollamaRequest),
         },
         this.timeoutMs,
+        this.retryCount,
+        this.log,
+        { provider: this.id, model: request.model },
       );
 
       if (!response.ok) {
@@ -463,7 +480,7 @@ export class OllamaProvider implements AIProvider {
     };
 
     try {
-      const response = await fetchWithTimeout(
+      const response = await fetchWithRetry(
         `${this.baseUrl}/api/embed`,
         {
           method: "POST",
@@ -471,6 +488,9 @@ export class OllamaProvider implements AIProvider {
           body: JSON.stringify(ollamaRequest),
         },
         this.timeoutMs,
+        this.retryCount,
+        this.log,
+        { provider: this.id, model: request.model },
       );
 
       if (!response.ok) {
@@ -529,10 +549,13 @@ export class OllamaProvider implements AIProvider {
     const startTime = performance.now();
 
     try {
-      const response = await fetchWithTimeout(
+      const response = await fetchWithRetry(
         `${this.baseUrl}/api/tags`,
         { method: "GET" },
         this.timeoutMs,
+        this.retryCount,
+        this.log,
+        { provider: this.id },
       );
 
       const latencyMs = Math.round(performance.now() - startTime);
