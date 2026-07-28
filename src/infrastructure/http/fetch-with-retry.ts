@@ -140,6 +140,10 @@ export async function fetchWithRetry(
     }
   }
 
-  // All attempts exhausted
+  // All attempts exhausted — return the last response if it was a retryable status,
+  // otherwise throw the last error
+  if (lastError instanceof Response) {
+    return lastError;
+  }
   throw lastError;
 }
