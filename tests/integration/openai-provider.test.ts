@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { OpenAIProvider } from "@/infrastructure/ai/openai/provider";
 import type { Logger } from "@/core/logging/logger";
-import type { ModelId } from "@/core/ai/types";
+import type { ModelId, StreamEvent } from "@/core/ai/types";
 
 function createMockLogger(): Logger {
   return {
@@ -53,10 +53,10 @@ describe("OpenAIProvider (integration)", () => {
 
       const response = await provider.chat({
         model: "gpt-4o" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       });
 
-      expect(response.message.content).toBe("Hello from OpenAI!");
+      expect(response.message.content).toEqual([{ type: "text", text: "Hello from OpenAI!" }]);
       expect(response.model).toBe("gpt-4o");
       expect(response.usage.inputTokens).toBe(10);
       expect(response.usage.outputTokens).toBe(5);
@@ -86,7 +86,7 @@ describe("OpenAIProvider (integration)", () => {
 
       const response = await provider.chat({
         model: "gpt-4o" as ModelId,
-        messages: [{ role: "user", content: "Call a tool" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Call a tool" }] }],
       });
 
       expect(response.finishReason).toBe("tool-calls");
@@ -114,7 +114,7 @@ describe("OpenAIProvider (integration)", () => {
 
       const response = await provider.chat({
         model: "gpt-4o" as ModelId,
-        messages: [{ role: "user", content: "Bad content" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Bad content" }] }],
       });
 
       expect(response.finishReason).toBe("content-filter");
@@ -128,22 +128,23 @@ describe("OpenAIProvider (integration)", () => {
       await expect(
         provider.chat({
           model: "gpt-4o" as ModelId,
-          messages: [{ role: "user", content: "Hi" }],
+          messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
         }),
       ).rejects.toThrow(/OpenAI API returned status 401/);
     });
 
-    it("throws when model is missing", async () => {
+    it("throws when model is empty", async () => {
       await expect(
         provider.chat({
-          messages: [{ role: "user", content: "Hi" }],
+          model: "" as ModelId,
+          messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
         }),
       ).rejects.toThrow("OpenAIProvider.chat() requires a model");
     });
   });
 
   describe("stream", () => {
-    it("yields stream chunks from SSE response", async () => {
+    it("yields canonical stream events from an SSE response", async () => {
       const sseData = [
         'data: {"id":"1","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":"Hello"},"finish_reason":null}]}',
         'data: {"id":"2","object":"chat.completion.chunk","created":1700000000,"model":"gpt-4o","choices":[{"index":0,"delta":{"content":" world"},"finish_reason":null}]}',
@@ -163,35 +164,37 @@ describe("OpenAIProvider (integration)", () => {
         new Response(stream, { status: 200 }),
       );
 
-      const chunks: string[] = [];
-      for await (const chunk of provider.stream({
+      const events: StreamEvent[] = [];
+      for await (const event of provider.stream({
         model: "gpt-4o" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       })) {
-        chunks.push(chunk.content);
-        if (chunk.done) {
-          expect(chunk.finishReason).toBe("stop");
-        }
+        events.push(event);
       }
 
-      expect(chunks).toEqual(["Hello", " world", ""]);
+      expect(events.filter((event) => event.type === "text-delta").map((event) => event.delta)).toEqual(["Hello", " world"]);
+      expect(events.find((event) => event.type === "finish")).toMatchObject({ type: "finish", finishReason: "stop" });
     });
 
-    it("throws on stream API error", async () => {
+    it("emits an ErrorEvent on stream API error", async () => {
       vi.spyOn(globalThis, "fetch").mockResolvedValue(
         new Response("Unauthorized", { status: 401 }),
       );
 
       const iterator = provider.stream({
         model: "gpt-4o" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       });
 
-      await expect(async () => {
-        for await (const _chunk of iterator) {
-          // Should throw
-        }
-      }).rejects.toThrow(/OpenAI stream API returned status 401/);
+      const events: StreamEvent[] = [];
+      for await (const event of iterator) events.push(event);
+
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: "error",
+          error: expect.objectContaining({ message: expect.stringMatching(/OpenAI stream API returned status 401/) }),
+        }),
+      ]);
     });
   });
 

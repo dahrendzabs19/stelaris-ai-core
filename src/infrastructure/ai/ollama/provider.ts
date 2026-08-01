@@ -17,16 +17,16 @@ import type {
   AIProvider,
   ChatRequest,
   ChatResponse,
-  StreamChunk,
+  StreamEvent,
   EmbeddingRequest,
   EmbeddingResponse,
   HealthStatus,
   ProviderId,
   ModelId,
-  AIModel,
+  ModelDescriptor,
   TokenUsage,
   FinishReason,
-  ChatMessage,
+  Message,
 } from "@/core/ai/types";
 
 import type { Logger } from "@/core/logging/logger";
@@ -82,7 +82,7 @@ interface OllamaChatResponse {
   eval_duration?: number;
 }
 
-interface OllamaStreamChunk {
+interface OllamaStreamPayload {
   model: string;
   created_at: string;
   message: { content: string };
@@ -140,8 +140,36 @@ function mapFinishReason(reason?: string): FinishReason | undefined {
   return undefined;
 }
 
-function toOllamaMessage(msg: ChatMessage): OllamaMessage {
-  return { role: msg.role, content: msg.content };
+function toOllamaMessage(msg: Message): OllamaMessage {
+  const text: string[] = [];
+  const images: string[] = [];
+
+  for (const part of msg.content) {
+    switch (part.type) {
+      case "text":
+        text.push(part.text);
+        break;
+      case "image":
+        if (part.source.type !== "base64") {
+          throw new OllamaConfigurationError(
+            "Ollama requires base64 image content; image URLs are not supported by this adapter",
+          );
+        }
+        images.push(part.source.data);
+        break;
+      case "tool-call":
+      case "tool-result":
+        throw new OllamaConfigurationError(
+          "Ollama tool-call content is not supported by this adapter yet",
+        );
+    }
+  }
+
+  return {
+    role: msg.role,
+    content: text.join(""),
+    ...(images.length > 0 ? { images } : {}),
+  };
 }
 
 function toTokenUsage(
@@ -162,7 +190,7 @@ function toTokenUsage(
 export class OllamaProvider implements AIProvider {
   readonly id: ProviderId = "ollama" as ProviderId;
   readonly name = "Ollama";
-  readonly models: AIModel[];
+  readonly models: ModelDescriptor[];
 
   private readonly baseUrl: string;
   private readonly timeoutMs: number;
@@ -183,7 +211,7 @@ export class OllamaProvider implements AIProvider {
     this.models = this.buildModels();
   }
 
-  private buildModels(): AIModel[] {
+  private buildModels(): ModelDescriptor[] {
     return [
       {
         id: "qwen3:8b" as ModelId,
@@ -292,7 +320,7 @@ export class OllamaProvider implements AIProvider {
       return {
         message: {
           role: "assistant",
-          content: data.message.content,
+          content: [{ type: "text", text: data.message.content }],
         },
         model: data.model as ModelId,
         usage: toTokenUsage(data.prompt_eval_count, data.eval_count),
@@ -327,7 +355,7 @@ export class OllamaProvider implements AIProvider {
   // Stream
   // --------------------------------------------------------------------------
 
-  async *stream(request: ChatRequest): AsyncIterable<StreamChunk> {
+  async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     if (!request.model) {
       throw new OllamaConfigurationError(
         "OllamaProvider.stream() requires a model in the request",
@@ -400,18 +428,18 @@ export class OllamaProvider implements AIProvider {
             const trimmed = line.trim();
             if (!trimmed) continue;
 
-            const chunk = this.parseStreamChunk(trimmed);
-            if (chunk) {
-              yield chunk;
-              if (chunk.done) return;
+            const events = this.parseStreamEvents(trimmed);
+            for (const event of events) {
+              yield event;
+              if (event.type === "finish") return;
             }
           }
         }
 
         if (buffer.trim()) {
-          const chunk = this.parseStreamChunk(buffer.trim());
-          if (chunk && !chunk.done) {
-            yield chunk;
+          const events = this.parseStreamEvents(buffer.trim());
+          for (const event of events) {
+            yield event;
           }
         }
       } finally {
@@ -429,30 +457,52 @@ export class OllamaProvider implements AIProvider {
         error: error instanceof Error ? error.name : "UnknownError",
       });
 
-      throw error;
+      yield {
+        type: "error",
+        model: request.model,
+        provider: this.id,
+        error: {
+          message: error instanceof Error ? error.message : "Unknown Ollama stream error",
+          code: error instanceof OllamaAPIError ? String(error.status ?? "api-error") : undefined,
+        },
+      };
     }
   }
 
-  private parseStreamChunk(line: string): StreamChunk | null {
+  private parseStreamEvents(line: string): StreamEvent[] {
     try {
       const data: unknown = JSON.parse(line);
-      if (!this.isOllamaStreamChunk(data)) return null;
+      if (!this.isOllamaStreamPayload(data)) return [];
 
-      const chunk: StreamChunk = {
-        content: data.message?.content ?? "",
-        model: data.model as ModelId,
-        provider: this.id,
-        done: data.done,
-      };
-
-      if (data.done) {
-        chunk.usage = toTokenUsage(data.prompt_eval_count, data.eval_count);
-        chunk.finishReason = mapFinishReason(data.done_reason) as FinishReason;
+      const events: StreamEvent[] = [];
+      const content = data.message?.content;
+      if (content) {
+        events.push({
+          type: "text-delta",
+          delta: content,
+          model: data.model as ModelId,
+          provider: this.id,
+        });
       }
 
-      return chunk;
+      if (data.done) {
+        events.push({
+          type: "usage",
+          usage: toTokenUsage(data.prompt_eval_count, data.eval_count),
+          model: data.model as ModelId,
+          provider: this.id,
+        });
+        events.push({
+          type: "finish",
+          finishReason: mapFinishReason(data.done_reason) ?? "stop",
+          model: data.model as ModelId,
+          provider: this.id,
+        });
+      }
+
+      return events;
     } catch {
-      return null;
+      return [];
     }
   }
 
@@ -634,7 +684,7 @@ export class OllamaProvider implements AIProvider {
     );
   }
 
-  private isOllamaStreamChunk(data: unknown): data is OllamaStreamChunk {
+  private isOllamaStreamPayload(data: unknown): data is OllamaStreamPayload {
     if (typeof data !== "object" || data === null) return false;
     const d = data as Record<string, unknown>;
     return typeof d.model === "string" && typeof d.done === "boolean";

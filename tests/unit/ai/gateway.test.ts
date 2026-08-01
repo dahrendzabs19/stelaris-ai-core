@@ -3,7 +3,7 @@ import { AIGateway, GatewayError } from "@/core/ai/gateway";
 import { ProviderRouter } from "@/core/ai/provider-router";
 import { ModelRegistry } from "@/core/ai/model-registry";
 import { AIRegistry } from "@/core/ai/registry";
-import type { AIProvider, ProviderId, ModelId, ChatRequest, ChatResponse, StreamChunk, EmbeddingRequest, EmbeddingResponse, HealthStatus } from "@/core/ai/types";
+import type { AIProvider, ProviderId, ModelId, ChatRequest, StreamEvent } from "@/core/ai/types";
 import type { AppConfig } from "@/core/config/config";
 import type { Logger } from "@/core/logging/logger";
 
@@ -39,16 +39,17 @@ function createMockProvider(id: string): AIProvider {
     name: `Provider ${id}`,
     models: [],
     chat: vi.fn().mockResolvedValue({
-      message: { role: "assistant", content: "Hello!" },
+      message: { role: "assistant", content: [{ type: "text", text: "Hello!" }] },
       model: "mock" as ModelId,
       usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
       finishReason: "stop" as const,
       provider: id as ProviderId,
       latencyMs: 100,
     }),
-    stream: async function* (_request: ChatRequest): AsyncIterable<StreamChunk> {
-      yield { content: "Hello", model: "mock" as ModelId, provider: id as ProviderId, done: false };
-      yield { content: "!", model: "mock" as ModelId, provider: id as ProviderId, done: true, finishReason: "stop" };
+    stream: async function* (_request: ChatRequest): AsyncIterable<StreamEvent> {
+      yield { type: "text-delta", delta: "Hello", model: "mock" as ModelId, provider: id as ProviderId };
+      yield { type: "usage", usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 }, model: "mock" as ModelId, provider: id as ProviderId };
+      yield { type: "finish", finishReason: "stop", model: "mock" as ModelId, provider: id as ProviderId };
     },
     embed: vi.fn().mockResolvedValue({
       embeddings: [[0.1, 0.2, 0.3]],
@@ -89,10 +90,10 @@ describe("AIGateway", () => {
 
       const response = await gateway.chat({
         model: "mock-model" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       });
 
-      expect(response.message.content).toBe("Hello!");
+      expect(response.message.content).toEqual([{ type: "text", text: "Hello!" }]);
       expect(response.provider).toBe("test-provider" as ProviderId);
       expect(response.usage.totalTokens).toBe(15);
     });
@@ -104,27 +105,28 @@ describe("AIGateway", () => {
 
       await expect(gateway.chat({
         model: "mock-model" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       })).rejects.toThrow(GatewayError);
     });
   });
 
   describe("stream", () => {
-    it("yields stream chunks", async () => {
+    it("yields discriminated stream events", async () => {
       const provider = createMockProvider("test-provider");
       const gateway = createGateway("test-provider", provider);
 
-      const chunks: StreamChunk[] = [];
-      for await (const chunk of gateway.stream({
+      const events: StreamEvent[] = [];
+      for await (const event of gateway.stream({
         model: "mock-model" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       })) {
-        chunks.push(chunk);
+        events.push(event);
       }
 
-      expect(chunks).toHaveLength(2);
-      expect(chunks[0].content).toBe("Hello");
-      expect(chunks[1].done).toBe(true);
+      expect(events).toHaveLength(3);
+      expect(events[0]).toMatchObject({ type: "text-delta", delta: "Hello" });
+      expect(events[1]).toMatchObject({ type: "usage", usage: { totalTokens: 15 } });
+      expect(events[2]).toMatchObject({ type: "finish", finishReason: "stop" });
     });
 
     it("throws GatewayError when stream fails", async () => {
@@ -136,7 +138,7 @@ describe("AIGateway", () => {
 
       const iterator = gateway.stream({
         model: "mock-model" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       });
 
       await expect(async () => {

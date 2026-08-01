@@ -29,7 +29,7 @@
 import type {
   ChatRequest,
   ChatResponse,
-  StreamChunk,
+  StreamEvent,
   EmbeddingRequest,
   EmbeddingResponse,
   HealthStatus,
@@ -82,7 +82,7 @@ export class GatewayError extends Error {
  *
  * const response = await gateway.chat({
  *   model: "qwen3:8b",
- *   messages: [{ role: "user", content: "Hello" }],
+ *   messages: [{ role: "user", content: [{ type: "text", text: "Hello" }] }],
  * });
  * ```
  *
@@ -123,7 +123,7 @@ export class AIGateway {
       model: request.model,
     });
 
-    const provider = this.router.resolve(request.model!);
+    const provider = this.router.resolve(request.model);
 
     this.log.info("Gateway: provider resolved", {
       provider: provider.id,
@@ -155,19 +155,20 @@ export class AIGateway {
    * Send a streaming chat completion request to the appropriate provider.
    *
    * The provider is determined automatically from the model ID in the request.
-   * Yields StreamChunks as they arrive from the provider.
-   * The stream ends when a chunk with `done: true` is received.
+   * Yields discriminated StreamEvents as they arrive from the provider.
+   * A successful stream ends with a FinishEvent; a protocol-level failure is
+   * represented by an ErrorEvent.
    *
    * @param request - The generic chat completion request
-   * @returns An async iterable of stream chunks
+   * @returns An async iterable of stream events
    * @throws {GatewayError} If the provider is not found or the stream fails
    */
-  async *stream(request: ChatRequest): AsyncIterable<StreamChunk> {
+  async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     this.log.info("Gateway: stream request received", {
       model: request.model,
     });
 
-    const provider = this.router.resolve(request.model!);
+    const provider = this.router.resolve(request.model);
 
     this.log.info("Gateway: provider resolved for stream", {
       provider: provider.id,
@@ -175,8 +176,8 @@ export class AIGateway {
     });
 
     try {
-      for await (const chunk of provider.stream(request)) {
-        yield chunk;
+      for await (const event of provider.stream(request)) {
+        yield event;
       }
     } catch (error) {
       this.log.error("Gateway: stream request failed", {
@@ -211,7 +212,7 @@ export class AIGateway {
       model: request.model,
     });
 
-    const provider = this.router.resolve(request.model!);
+    const provider = this.router.resolve(request.model);
 
     this.log.info("Gateway: provider resolved for embed", {
       provider: provider.id,

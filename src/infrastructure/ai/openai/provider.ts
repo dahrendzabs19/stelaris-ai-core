@@ -17,16 +17,17 @@ import type {
   AIProvider,
   ChatRequest,
   ChatResponse,
-  StreamChunk,
+  StreamEvent,
   EmbeddingRequest,
   EmbeddingResponse,
   HealthStatus,
   ProviderId,
   ModelId,
-  AIModel,
+  ModelDescriptor,
   TokenUsage,
   FinishReason,
-  ChatMessage,
+  ContentPart,
+  Message,
 } from "@/core/ai/types";
 
 import type { OpenAIConfig } from "@/core/config/config";
@@ -58,9 +59,21 @@ export interface OpenAIProviderConfig extends OpenAIConfig {
 
 interface OpenAIMessage {
   role: string;
-  content: string;
+  content: string | OpenAIContentPart[];
   name?: string;
 }
+
+interface OpenAITextContentPart {
+  type: "text";
+  text: string;
+}
+
+interface OpenAIImageContentPart {
+  type: "image_url";
+  image_url: { url: string };
+}
+
+type OpenAIContentPart = OpenAITextContentPart | OpenAIImageContentPart;
 
 interface OpenAIChatRequest {
   model: string;
@@ -78,9 +91,14 @@ interface OpenAIUsage {
   total_tokens: number;
 }
 
+interface OpenAIResponseMessage {
+  role: string;
+  content: string;
+}
+
 interface OpenAIChoice {
   index: number;
-  message: OpenAIMessage;
+  message: OpenAIResponseMessage;
   finish_reason: string;
 }
 
@@ -102,7 +120,7 @@ interface OpenAIStreamChoice {
   finish_reason: string | null;
 }
 
-interface OpenAIStreamChunk {
+interface OpenAIStreamPayload {
   id: string;
   object: string;
   created: number;
@@ -166,10 +184,32 @@ function mapFinishReason(reason: string | null | undefined): FinishReason {
   return "stop";
 }
 
-function toOpenAIMessage(msg: ChatMessage): OpenAIMessage {
+function toOpenAIContentPart(part: ContentPart): OpenAIContentPart {
+  switch (part.type) {
+    case "text":
+      return { type: "text", text: part.text };
+    case "image":
+      return {
+        type: "image_url",
+        image_url: {
+          url:
+            part.source.type === "url"
+              ? part.source.url
+              : `data:${part.source.mediaType};base64,${part.source.data}`,
+        },
+      };
+    case "tool-call":
+    case "tool-result":
+      throw new OpenAIConfigurationError(
+        "OpenAI tool-call content is not supported by this adapter yet",
+      );
+  }
+}
+
+function toOpenAIMessage(msg: Message): OpenAIMessage {
   return {
     role: msg.role,
-    content: msg.content,
+    content: msg.content.map(toOpenAIContentPart),
     name: msg.name,
   };
 }
@@ -189,7 +229,7 @@ function toTokenUsage(usage: OpenAIUsage): TokenUsage {
 export class OpenAIProvider implements AIProvider {
   readonly id: ProviderId = "openai" as ProviderId;
   readonly name = "OpenAI";
-  readonly models: AIModel[];
+  readonly models: ModelDescriptor[];
 
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -215,8 +255,38 @@ export class OpenAIProvider implements AIProvider {
     this.models = this.buildModels();
   }
 
-  private buildModels(): AIModel[] {
+  private buildModels(): ModelDescriptor[] {
     return [
+      {
+        id: "gpt-4.1" as ModelId,
+        name: "GPT-4.1",
+        provider: this.id,
+        capabilities: {
+          streaming: true,
+          functionCalling: true,
+          vision: true,
+          embeddings: false,
+          maxOutputTokens: 32768,
+          maxContextLength: 200000,
+        },
+        costPer1KTokens: { input: 2, output: 8 },
+        qualityScore: 0.97,
+      },
+      {
+        id: "gpt-4.1-mini" as ModelId,
+        name: "GPT-4.1 Mini",
+        provider: this.id,
+        capabilities: {
+          streaming: true,
+          functionCalling: true,
+          vision: true,
+          embeddings: false,
+          maxOutputTokens: 16384,
+          maxContextLength: 200000,
+        },
+        costPer1KTokens: { input: 0.4, output: 1.6 },
+        qualityScore: 0.92,
+      },
       {
         id: "gpt-4o" as ModelId,
         name: "GPT-4o",
@@ -328,7 +398,7 @@ export class OpenAIProvider implements AIProvider {
       return {
         message: {
           role: "assistant",
-          content: choice.message.content,
+          content: [{ type: "text", text: choice.message.content }],
         },
         model: data.model as ModelId,
         usage: toTokenUsage(data.usage),
@@ -354,7 +424,7 @@ export class OpenAIProvider implements AIProvider {
   // Stream
   // --------------------------------------------------------------------------
 
-  async *stream(request: ChatRequest): AsyncIterable<StreamChunk> {
+  async *stream(request: ChatRequest): AsyncIterable<StreamEvent> {
     if (!request.model) {
       throw new OpenAIConfigurationError(
         "OpenAIProvider.stream() requires a model in the request",
@@ -412,6 +482,8 @@ export class OpenAIProvider implements AIProvider {
       const decoder = new TextDecoder();
       let buffer = "";
 
+      let finished = false;
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -429,13 +501,24 @@ export class OpenAIProvider implements AIProvider {
             const payload = line.slice(6);
 
             if (payload === "[DONE]") {
+              if (!finished) {
+                yield {
+                  type: "finish",
+                  model: request.model,
+                  provider: this.id,
+                  finishReason: "stop",
+                };
+              }
               return;
             }
 
-            const chunk = this.parseStreamChunk(payload);
-            if (chunk) {
-              yield chunk;
-              if (chunk.done) return;
+            const events = this.parseStreamEvents(payload);
+            for (const event of events) {
+              yield event;
+              if (event.type === "finish") {
+                finished = true;
+                return;
+              }
             }
           }
         }
@@ -445,9 +528,9 @@ export class OpenAIProvider implements AIProvider {
           if (line.startsWith("data: ")) {
             const payload = line.slice(6);
             if (payload !== "[DONE]") {
-              const chunk = this.parseStreamChunk(payload);
-              if (chunk && !chunk.done) {
-                yield chunk;
+              const events = this.parseStreamEvents(payload);
+              for (const event of events) {
+                yield event;
               }
             }
           }
@@ -467,37 +550,57 @@ export class OpenAIProvider implements AIProvider {
         error: error instanceof Error ? error.name : "UnknownError",
       });
 
-      throw error;
+      yield {
+        type: "error",
+        model: request.model,
+        provider: this.id,
+        error: {
+          message: error instanceof Error ? error.message : "Unknown OpenAI stream error",
+          code: error instanceof OpenAIAPIError ? String(error.status ?? "api-error") : undefined,
+        },
+      };
     }
   }
 
-  private parseStreamChunk(payload: string): StreamChunk | null {
+  private parseStreamEvents(payload: string): StreamEvent[] {
     try {
       const data: unknown = JSON.parse(payload);
 
-      if (!this.isOpenAIStreamChunk(data)) return null;
+      if (!this.isOpenAIStreamPayload(data)) return [];
 
       const choice = data.choices[0];
+      const events: StreamEvent[] = [];
 
-      const chunk: StreamChunk = {
-        content: choice?.delta?.content ?? "",
-        model: data.model as ModelId,
-        provider: this.id,
-        done: false,
-      };
-
-      if (choice?.finish_reason) {
-        chunk.done = true;
-        chunk.finishReason = mapFinishReason(choice.finish_reason);
-
-        if (data.usage) {
-          chunk.usage = toTokenUsage(data.usage);
-        }
+      if (choice?.delta?.content) {
+        events.push({
+          type: "text-delta",
+          delta: choice.delta.content,
+          model: data.model as ModelId,
+          provider: this.id,
+        });
       }
 
-      return chunk;
+      if (data.usage) {
+        events.push({
+          type: "usage",
+          usage: toTokenUsage(data.usage),
+          model: data.model as ModelId,
+          provider: this.id,
+        });
+      }
+
+      if (choice?.finish_reason) {
+        events.push({
+          type: "finish",
+          finishReason: mapFinishReason(choice.finish_reason),
+          model: data.model as ModelId,
+          provider: this.id,
+        });
+      }
+
+      return events;
     } catch {
-      return null;
+      return [];
     }
   }
 
@@ -682,13 +785,12 @@ export class OpenAIProvider implements AIProvider {
   // Type Guards
   // --------------------------------------------------------------------------
 
-  private isOpenAIStreamChunk(data: unknown): data is OpenAIStreamChunk {
+  private isOpenAIStreamPayload(data: unknown): data is OpenAIStreamPayload {
     if (typeof data !== "object" || data === null) return false;
     const d = data as Record<string, unknown>;
     return (
       typeof d.model === "string" &&
-      Array.isArray(d.choices) &&
-      d.choices.length > 0
+      Array.isArray(d.choices)
     );
   }
 }

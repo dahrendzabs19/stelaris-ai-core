@@ -116,9 +116,9 @@ export interface AppConfig {
  * @throws {ConfigValidationError} If any required environment variables are missing.
  */
 export function createConfig(): AppConfig {
-  const ollamaBaseUrl = readRequired(
+  const ollamaBaseUrl = readOptional(
     ENV.OLLAMA_BASE_URL,
-    "OLLAMA_BASE_URL is required. Set it to the URL of your Ollama server (e.g., http://localhost:11434).",
+    "http://localhost:11434",
   );
 
   const timeoutMs = readOptionalNumber(
@@ -188,6 +188,21 @@ function readRequired(name: string, hint: string): string {
 
   if (value === undefined || value === null || value.trim() === "") {
     throw new ConfigValidationError(`Missing required environment variable: ${name}\n  ${hint}`);
+  }
+
+  return value.trim();
+}
+
+/**
+ * Read an optional environment variable with a fallback.
+ *
+ * If the variable is not set or empty, the default value is returned.
+ */
+function readOptional(name: string, fallback: string): string {
+  const value = process.env[name];
+
+  if (value === undefined || value === null || value.trim() === "") {
+    return fallback;
   }
 
   return value.trim();

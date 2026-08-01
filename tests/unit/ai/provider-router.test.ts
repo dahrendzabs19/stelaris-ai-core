@@ -2,7 +2,7 @@ import { describe, it, expect, vi } from "vitest";
 import { ProviderRouter, UnknownModelError, ProviderUnavailableError } from "@/core/ai/provider-router";
 import { ModelRegistry } from "@/core/ai/model-registry";
 import { AIRegistry } from "@/core/ai/registry";
-import type { AIProvider, ProviderId, ModelId, ChatRequest, ChatResponse, StreamChunk, EmbeddingRequest, EmbeddingResponse, HealthStatus } from "@/core/ai/types";
+import type { AIProvider, ProviderId, ModelId, ChatRequest, ChatResponse, StreamEvent, EmbeddingRequest, EmbeddingResponse, HealthStatus } from "@/core/ai/types";
 
 function createMockProvider(id: string): AIProvider {
   return {
@@ -11,7 +11,7 @@ function createMockProvider(id: string): AIProvider {
     models: [],
     chat: async (_request: ChatRequest): Promise<ChatResponse> => {
       return {
-        message: { role: "assistant", content: "mock" },
+        message: { role: "assistant", content: [{ type: "text", text: "mock" }] },
         model: "mock" as ModelId,
         usage: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
         finishReason: "stop",
@@ -19,7 +19,7 @@ function createMockProvider(id: string): AIProvider {
         latencyMs: 0,
       };
     },
-    stream: async function* (_request: ChatRequest): AsyncIterable<StreamChunk> {
+    stream: async function* (_request: ChatRequest): AsyncIterable<StreamEvent> {
       // No-op
     },
     embed: async (_request: EmbeddingRequest): Promise<EmbeddingResponse> => {

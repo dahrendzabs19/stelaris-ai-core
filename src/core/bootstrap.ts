@@ -13,88 +13,76 @@
 //   - No process.env access (that belongs in createConfig() only)
 // ============================================================================
 
-import { createConfig } from "@/core/config/config";
+import { createConfig, type AppConfig } from "@/core/config/config";
 import { AIRegistry } from "@/core/ai/registry";
 import { ModelRegistry } from "@/core/ai/model-registry";
 import { ProviderRouter } from "@/core/ai/provider-router";
 import { ConsoleLogger } from "@/core/logging/console-logger";
 import { OllamaProvider } from "@/infrastructure/ai/ollama/provider";
+import { OpenAIProvider } from "@/infrastructure/ai/openai/provider";
 import { AIGateway } from "@/core/ai/gateway";
 import type { ModelId, ProviderId } from "@/core/ai/types";
 
 // ----------------------------------------------------------------------------
-// 1. Configuration
+// Factory
 // ----------------------------------------------------------------------------
 //
-// Configuration reads from process.env and validates required values.
-// This is the ONLY place where process.env is read indirectly (through
-// createConfig()). No other module should access process.env.
-
-const config = createConfig();
-
-// ----------------------------------------------------------------------------
-// 2. Logger
-// ----------------------------------------------------------------------------
+// createGateway() is the public factory for constructing a fully-wired
+// AIGateway instance. It accepts an AppConfig (typically produced by
+// createConfig()) and returns a ready-to-use gateway.
 //
-// A single logger instance is shared across the application.
-// It implements the Logger interface — no module references ConsoleLogger
-// directly except this composition root.
-
-const log = new ConsoleLogger();
-
-// ----------------------------------------------------------------------------
-// 3. Registry
-// ----------------------------------------------------------------------------
+// The factory:
+//   1. Creates a ConsoleLogger
+//   2. Creates an AIRegistry and ModelRegistry
+//   3. Instantiates providers with config + logger
+//   4. Registers providers in the registry
+//   5. Registers model-to-provider mappings
+//   6. Creates a ProviderRouter from both registries
+//   7. Creates and returns the AIGateway
 //
-// The registry is a simple catalog. Providers are registered after creation.
+// Consumers call this once at startup and reuse the returned gateway.
+// No global state, no process.env access inside the factory.
 
-const registry = new AIRegistry();
-const models = new ModelRegistry();
+export function createGateway(config: AppConfig): AIGateway {
+  // 1. Logger
+  const log = new ConsoleLogger();
 
-// ----------------------------------------------------------------------------
-// 4. Providers
-// ----------------------------------------------------------------------------
-//
-// Providers receive their configuration section and a logger, then are
-// registered immediately. This is the ONLY place where providers are
-// instantiated and registered. Model-to-provider mappings are also here.
+  // 2. Registries
+  const registry = new AIRegistry();
+  const models = new ModelRegistry();
 
-const ollama = new OllamaProvider(
-  {
-    ...config.ai.ollama,
-    timeoutMs: config.ai.timeoutMs,
-    retryCount: config.ai.retryCount,
-  },
-  log,
-);
-registry.register(ollama);
+  // 3. Providers
+  const ollama = new OllamaProvider(
+    {
+      ...config.ai.ollama,
+      timeoutMs: config.ai.timeoutMs,
+      retryCount: config.ai.retryCount,
+    },
+    log,
+  );
+  registry.register(ollama);
 
-models.register("qwen3:8b" as ModelId, "ollama" as ProviderId);
-models.register("qwen2.5-coder:7b" as ModelId, "ollama" as ProviderId);
+  const openai = new OpenAIProvider(
+    {
+      ...config.ai.openai,
+      timeoutMs: config.ai.timeoutMs,
+      retryCount: config.ai.retryCount,
+    },
+    log,
+  );
+  registry.register(openai);
 
-// ----------------------------------------------------------------------------
-// 5. Router
-// ----------------------------------------------------------------------------
-//
-// The Provider Router combines both registries to resolve model IDs
-// to AIProvider instances.
+  // 4. Model mappings
+  models.register("qwen3:8b" as ModelId, "ollama" as ProviderId);
+  models.register("qwen2.5-coder:7b" as ModelId, "ollama" as ProviderId);
+  models.register("gpt-4.1" as ModelId, "openai" as ProviderId);
+  models.register("gpt-4.1-mini" as ModelId, "openai" as ProviderId);
+  models.register("gpt-4o" as ModelId, "openai" as ProviderId);
+  models.register("gpt-4o-mini" as ModelId, "openai" as ProviderId);
 
-const router = new ProviderRouter(models, registry);
+  // 5. Router
+  const router = new ProviderRouter(models, registry);
 
-// ----------------------------------------------------------------------------
-// 6. Gateway
-// ----------------------------------------------------------------------------
-//
-// The Gateway receives the full config, the router, and the logger.
-// It resolves providers automatically from the model ID in each request.
-
-const gateway = new AIGateway(config, router, log);
-
-// ----------------------------------------------------------------------------
-// Exports
-// ----------------------------------------------------------------------------
-//
-// Export the wired dependencies so application code (API routes, etc.)
-// can consume them without knowing how they were constructed.
-
-export { config, registry, models, router, gateway };
+  // 6. Gateway
+  return new AIGateway(config, router, log);
+}

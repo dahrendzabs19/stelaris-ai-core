@@ -53,38 +53,84 @@ export type ModelId = string & { readonly __brand: "ModelId" };
  * - "assistant": AI-generated response
  * - "tool":      Result of a tool/function call (used in function-calling flows)
  */
-export type MessageRole = "system" | "user" | "assistant" | "tool";
+export type MessageRole = "system" | "developer" | "user" | "assistant" | "tool";
 
 // ----------------------------------------------------------------------------
 // Messages
 // ----------------------------------------------------------------------------
 
 /**
- * A single message in a conversation.
+ * A provider-agnostic unit of conversational input or output.
  *
- * This is the universal message format that all providers must support.
- * Provider-specific formats (e.g., OpenAI's `content` array with image parts)
- * are handled by the adapter layer, not here.
+ * A message is intentionally composed from content parts rather than a single
+ * string. Provider adapters translate these canonical parts to and from their
+ * native wire formats.
  */
-export interface ChatMessage {
+export interface Message {
   /** The role of the message sender */
   role: MessageRole;
 
-  /** The text content of the message */
-  content: string;
+  /** Ordered, multimodal content carried by the message. */
+  content: ContentPart[];
 
   /**
-   * Optional name for the message sender.
-   * Used for distinguishing between multiple users or tools.
+   * Optional name for a provider-supported message participant.
+   *
+   * Tool-call correlation is represented by ToolCallPart and ToolResultPart,
+   * not by a message-level field.
    */
   name?: string;
-
-  /**
-   * Optional tool call ID (for tool/function-calling responses).
-   * Present when role is "tool" to link back to the tool call.
-   */
-  toolCallId?: string;
 }
+
+/** Plain UTF-8 text content. */
+export interface TextPart {
+  type: "text";
+  text: string;
+}
+
+/** A remotely accessible image. */
+export interface ImageUrlSource {
+  type: "url";
+  url: string;
+  mediaType?: string;
+}
+
+/** An inline base64-encoded image. */
+export interface ImageBase64Source {
+  type: "base64";
+  data: string;
+  mediaType: string;
+}
+
+/** A provider-neutral image input. */
+export interface ImagePart {
+  type: "image";
+  source: ImageUrlSource | ImageBase64Source;
+}
+
+/** A requested invocation of a named tool. */
+export interface ToolCallPart {
+  type: "tool-call";
+  toolCallId: string;
+  toolName: string;
+  arguments: unknown;
+}
+
+/** The result corresponding to a prior tool invocation. */
+export interface ToolResultPart {
+  type: "tool-result";
+  toolCallId: string;
+  result: unknown;
+  isError?: boolean;
+}
+
+/**
+ * Canonical content supported by the protocol.
+ *
+ * Reasoning is deliberately not represented here. It is reserved for a future
+ * protocol revision and must not leak provider-specific reasoning formats.
+ */
+export type ContentPart = TextPart | ImagePart | ToolCallPart | ToolResultPart;
 
 // ----------------------------------------------------------------------------
 // Requests
@@ -98,13 +144,15 @@ export interface ChatMessage {
  */
 export interface ChatRequest {
   /** The conversation messages (system prompt + history + latest input) */
-  messages: ChatMessage[];
+  messages: Message[];
 
   /**
    * The model to use for generation.
-   * If omitted, the provider's default model is used.
+   *
+   * Model selection is explicit so routing is deterministic and independent of
+   * provider defaults.
    */
-  model?: ModelId;
+  model: ModelId;
 
   /**
    * Sampling temperature (0.0 to 2.0).
@@ -157,7 +205,7 @@ export interface EmbeddingRequest {
   input: string | string[];
 
   /** The model to use for embedding. */
-  model?: ModelId;
+  model: ModelId;
 
   /** Optional unique identifier for the request. */
   requestId?: string;
@@ -205,7 +253,7 @@ export type FinishReason = "stop" | "length" | "tool-calls" | "content-filter" |
  */
 export interface ChatResponse {
   /** The generated message from the AI */
-  message: ChatMessage;
+  message: Message;
 
   /** The model that generated the response */
   model: ModelId;
@@ -227,38 +275,59 @@ export interface ChatResponse {
 }
 
 /**
- * A single chunk in a streaming response.
- *
- * When streaming, the response is split into multiple chunks.
- * Each chunk contains a piece of the generated content.
- * The final chunk may contain usage statistics.
+ * Common metadata emitted with every stream event.
  */
-export interface StreamChunk {
-  /** The text content of this chunk (may be empty for non-content chunks) */
-  content: string;
-
+export interface StreamEventBase {
   /** The model generating the stream */
   model: ModelId;
 
   /** The provider handling the stream */
   provider: ProviderId;
-
-  /**
-   * Whether this is the final chunk in the stream.
-   * The final chunk may contain usage statistics.
-   */
-  done: boolean;
-
-  /**
-   * Token usage (only present in the final chunk when done is true).
-   */
-  usage?: TokenUsage;
-
-  /**
-   * The finish reason (only present in the final chunk when done is true).
-   */
-  finishReason?: FinishReason;
 }
+
+/** An incremental text fragment. */
+export interface TextDeltaEvent extends StreamEventBase {
+  type: "text-delta";
+  delta: string;
+}
+
+/** An incremental update to a tool call under construction. */
+export interface ToolCallDeltaEvent extends StreamEventBase {
+  type: "tool-call-delta";
+  toolCallId: string;
+  toolName?: string;
+  argumentsDelta?: string;
+}
+
+/** Usage information reported during or after generation. */
+export interface UsageEvent extends StreamEventBase {
+  type: "usage";
+  usage: TokenUsage;
+}
+
+/** The terminal successful event for a stream. */
+export interface FinishEvent extends StreamEventBase {
+  type: "finish";
+  finishReason: FinishReason;
+}
+
+/** The terminal failure event for a stream. */
+export interface ErrorEvent extends StreamEventBase {
+  type: "error";
+  error: {
+    message: string;
+    code?: string;
+    retryable?: boolean;
+  };
+}
+
+/** A discriminated event emitted by a streaming generation. */
+export type StreamEvent =
+  | TextDeltaEvent
+  | ToolCallDeltaEvent
+  | UsageEvent
+  | FinishEvent
+  | ErrorEvent;
 
 /**
  * The response from an embedding request.
@@ -290,7 +359,7 @@ export interface EmbeddingResponse {
  * This is used by the Capability Registry to match tasks to models.
  * Each capability is a boolean flag indicating whether the model supports it.
  */
-export interface AIModelCapabilities {
+export interface ModelCapabilities {
   /** Can the model stream responses token-by-token? */
   streaming: boolean;
 
@@ -319,7 +388,7 @@ export interface AIModelCapabilities {
  * - Cost calculation
  * - Provider routing
  */
-export interface AIModel {
+export interface ModelDescriptor {
   /** Unique identifier for this model (e.g., "qwen3:8b") */
   id: ModelId;
 
@@ -330,7 +399,7 @@ export interface AIModel {
   provider: ProviderId;
 
   /** The capabilities this model supports */
-  capabilities: AIModelCapabilities;
+  capabilities: ModelCapabilities;
 
   /**
    * Cost per 1,000 tokens for input and output.
@@ -403,7 +472,7 @@ export interface AIProvider {
   readonly name: string;
 
   /** The models this provider offers */
-  readonly models: AIModel[];
+  readonly models: ModelDescriptor[];
 
   /**
    * Send a chat completion request and receive the full response.
@@ -419,9 +488,10 @@ export interface AIProvider {
    * Use this for real-time streaming where you want to display
    * tokens as they are generated.
    *
-   * The stream ends when a chunk with `done: true` is received.
+   * A successful stream ends with a FinishEvent. A protocol-level stream
+   * failure is represented by an ErrorEvent.
    */
-  stream(request: ChatRequest): AsyncIterable<StreamChunk>;
+  stream(request: ChatRequest): AsyncIterable<StreamEvent>;
 
   /**
    * Generate embeddings for the given text(s).

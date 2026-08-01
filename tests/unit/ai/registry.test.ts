@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { AIRegistry, ProviderAlreadyRegisteredError, ProviderNotFoundError } from "@/core/ai/registry";
-import type { AIProvider, ProviderId, ModelId, AIModel, ChatRequest, ChatResponse, StreamChunk, EmbeddingRequest, EmbeddingResponse, HealthStatus } from "@/core/ai/types";
+import type { AIProvider, ProviderId, ChatRequest, ChatResponse, StreamEvent, EmbeddingRequest, EmbeddingResponse, HealthStatus } from "@/core/ai/types";
 
 // ----------------------------------------------------------------------------
 // Helpers
@@ -14,7 +14,7 @@ function createMockProvider(id: string): AIProvider {
     chat: async (_request: ChatRequest): Promise<ChatResponse> => {
       throw new Error("Not implemented");
     },
-    stream: async function* (_request: ChatRequest): AsyncIterable<StreamChunk> {
+    stream: async function* (_request: ChatRequest): AsyncIterable<StreamEvent> {
       // No-op
     },
     embed: async (_request: EmbeddingRequest): Promise<EmbeddingResponse> => {

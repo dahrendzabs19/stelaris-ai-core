@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
 import { OllamaProvider } from "@/infrastructure/ai/ollama/provider";
 import type { Logger } from "@/core/logging/logger";
-import type { ModelId } from "@/core/ai/types";
+import type { ModelId, StreamEvent } from "@/core/ai/types";
 
 function createMockLogger(): Logger {
   return {
@@ -50,10 +50,10 @@ describe("OllamaProvider (integration)", () => {
 
       const response = await provider.chat({
         model: "qwen3:8b" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       });
 
-      expect(response.message.content).toBe("Hello from Ollama!");
+      expect(response.message.content).toEqual([{ type: "text", text: "Hello from Ollama!" }]);
       expect(response.model).toBe("qwen3:8b");
       expect(response.usage.inputTokens).toBe(10);
       expect(response.usage.outputTokens).toBe(5);
@@ -70,7 +70,7 @@ describe("OllamaProvider (integration)", () => {
       await expect(
         provider.chat({
           model: "qwen3:8b" as ModelId,
-          messages: [{ role: "user", content: "Hi" }],
+          messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
         }),
       ).rejects.toThrow(/Ollama chat API returned status 500/);
     });
@@ -83,22 +83,23 @@ describe("OllamaProvider (integration)", () => {
       await expect(
         provider.chat({
           model: "qwen3:8b" as ModelId,
-          messages: [{ role: "user", content: "Hi" }],
+          messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
         }),
       ).rejects.toThrow("Ollama chat API returned an invalid response format");
     });
 
-    it("throws when model is missing", async () => {
+    it("throws when model is empty", async () => {
       await expect(
         provider.chat({
-          messages: [{ role: "user", content: "Hi" }],
+          model: "" as ModelId,
+          messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
         }),
       ).rejects.toThrow("OllamaProvider.chat() requires a model");
     });
   });
 
   describe("stream", () => {
-    it("yields stream chunks from NDJSON response", async () => {
+    it("yields canonical stream events from an NDJSON response", async () => {
       const ndjson = [
         JSON.stringify({ model: "qwen3:8b", message: { content: "Hello" }, done: false }),
         JSON.stringify({ model: "qwen3:8b", message: { content: " world" }, done: false }),
@@ -124,36 +125,38 @@ describe("OllamaProvider (integration)", () => {
         new Response(stream, { status: 200 }),
       );
 
-      const chunks: string[] = [];
-      for await (const chunk of provider.stream({
+      const events: StreamEvent[] = [];
+      for await (const event of provider.stream({
         model: "qwen3:8b" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       })) {
-        chunks.push(chunk.content);
-        if (chunk.done) {
-          expect(chunk.finishReason).toBe("stop");
-          expect(chunk.usage?.inputTokens).toBe(10);
-        }
+        events.push(event);
       }
 
-      expect(chunks).toEqual(["Hello", " world"]);
+      expect(events.filter((event) => event.type === "text-delta").map((event) => event.delta)).toEqual(["Hello", " world"]);
+      expect(events.find((event) => event.type === "usage")).toMatchObject({ type: "usage", usage: { inputTokens: 10 } });
+      expect(events.find((event) => event.type === "finish")).toMatchObject({ type: "finish", finishReason: "stop" });
     });
 
-    it("throws on stream API error", async () => {
+    it("emits an ErrorEvent on stream API error", async () => {
       vi.spyOn(globalThis, "fetch").mockResolvedValue(
         new Response("Bad Gateway", { status: 502 }),
       );
 
       const iterator = provider.stream({
         model: "qwen3:8b" as ModelId,
-        messages: [{ role: "user", content: "Hi" }],
+        messages: [{ role: "user", content: [{ type: "text", text: "Hi" }] }],
       });
 
-      await expect(async () => {
-        for await (const _chunk of iterator) {
-          // Should throw
-        }
-      }).rejects.toThrow(/Ollama stream API returned status 502/);
+      const events: StreamEvent[] = [];
+      for await (const event of iterator) events.push(event);
+
+      expect(events).toEqual([
+        expect.objectContaining({
+          type: "error",
+          error: expect.objectContaining({ message: expect.stringMatching(/Ollama stream API returned status 502/) }),
+        }),
+      ]);
     });
   });
 
