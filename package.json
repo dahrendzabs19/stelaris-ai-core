@@ -1,6 +1,37 @@
 {
   "name": "@stelaris/ai-core",
   "version": "0.1.0",
+  "description": "Provider-agnostic TypeScript AI SDK with a canonical multimodal protocol.",
+  "keywords": [
+    "ai",
+    "llm",
+    "openai",
+    "ollama",
+    "typescript",
+    "ai-sdk",
+    "multimodal"
+  ],
+  "author": "dahrendzabs19",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/dahrendzabs19/stelaris-ai-core.git"
+  },
+  "homepage": "https://github.com/dahrendzabs19/stelaris-ai-core#readme",
+  "bugs": {
+    "url": "https://github.com/dahrendzabs19/stelaris-ai-core/issues"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "files": [
+    "dist/",
+    "README.md",
+    "LICENSE"
+  ],
   "type": "module",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
@@ -10,8 +41,10 @@
       "import": "./dist/index.js"
     }
   },
+  "sideEffects": false,
   "scripts": {
     "build": "tsup",
+    "prepack": "npm run build",
     "test": "vitest run",
     "test:watch": "vitest"
   },
