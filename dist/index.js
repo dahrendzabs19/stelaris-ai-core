@@ -1619,24 +1619,28 @@ function createGateway(config) {
   const log = new ConsoleLogger();
   const registry = new AIRegistry();
   const models = new ModelRegistry();
-  const ollama = new OllamaProvider(
-    {
-      ...config.ai.ollama,
-      timeoutMs: config.ai.timeoutMs,
-      retryCount: config.ai.retryCount
-    },
-    log
-  );
-  registry.register(ollama);
-  const openai = new OpenAIProvider(
-    {
-      ...config.ai.openai,
-      timeoutMs: config.ai.timeoutMs,
-      retryCount: config.ai.retryCount
-    },
-    log
-  );
-  registry.register(openai);
+  if (config.ai.ollama.baseUrl) {
+    const ollama = new OllamaProvider(
+      {
+        ...config.ai.ollama,
+        timeoutMs: config.ai.timeoutMs,
+        retryCount: config.ai.retryCount
+      },
+      log
+    );
+    registry.register(ollama);
+  }
+  if (config.ai.openai.apiKey) {
+    const openai = new OpenAIProvider(
+      {
+        ...config.ai.openai,
+        timeoutMs: config.ai.timeoutMs,
+        retryCount: config.ai.retryCount
+      },
+      log
+    );
+    registry.register(openai);
+  }
   models.register("qwen3:8b", "ollama");
   models.register("qwen2.5-coder:7b", "ollama");
   models.register("gpt-4.1", "openai");

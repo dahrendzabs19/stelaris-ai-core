@@ -51,26 +51,33 @@ export function createGateway(config: AppConfig): AIGateway {
   const registry = new AIRegistry();
   const models = new ModelRegistry();
 
-  // 3. Providers
-  const ollama = new OllamaProvider(
-    {
-      ...config.ai.ollama,
-      timeoutMs: config.ai.timeoutMs,
-      retryCount: config.ai.retryCount,
-    },
-    log,
-  );
-  registry.register(ollama);
+  // 3. Providers — only register providers that are actually configured.
+  //    A provider must not be instantiated when its required configuration
+  //    (e.g. API key) is missing, otherwise its constructor throws and the
+  //    entire gateway fails to start — even when the provider is unused.
+  if (config.ai.ollama.baseUrl) {
+    const ollama = new OllamaProvider(
+      {
+        ...config.ai.ollama,
+        timeoutMs: config.ai.timeoutMs,
+        retryCount: config.ai.retryCount,
+      },
+      log,
+    );
+    registry.register(ollama);
+  }
 
-  const openai = new OpenAIProvider(
-    {
-      ...config.ai.openai,
-      timeoutMs: config.ai.timeoutMs,
-      retryCount: config.ai.retryCount,
-    },
-    log,
-  );
-  registry.register(openai);
+  if (config.ai.openai.apiKey) {
+    const openai = new OpenAIProvider(
+      {
+        ...config.ai.openai,
+        timeoutMs: config.ai.timeoutMs,
+        retryCount: config.ai.retryCount,
+      },
+      log,
+    );
+    registry.register(openai);
+  }
 
   // 4. Model mappings
   models.register("qwen3:8b" as ModelId, "ollama" as ProviderId);
