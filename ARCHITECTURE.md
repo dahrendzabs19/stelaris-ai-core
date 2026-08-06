@@ -17,13 +17,14 @@ The codebase is organized into concentric layers. Dependencies flow **inward** �
 ```
 ┌───────────────────────────────────────┐
 │         Frameworks & Drivers          │
-│  (Next.js, HTTP, fetch, process.env)  │
+│  (Next.js playground, HTTP, fetch)    │
 │  ┌─────────────────────────────────┐  │
 │  │     Interface Adapters          │  │
-│  │  (Routes, serialization, I/O)   │  │
+│  │  (Providers, HTTP helpers)      │  │
 │  │  ┌───────────────────────────┐  │  │
 │  │  │    Application Core       │  │  │
-│  │  │  (Gateway, Registry)      │  │  │
+│  │  │  (Gateway, Router,        │  │  │
+│  │  │   Registry, Bootstrap)    │  │  │
 │  │  │  ┌─────────────────────┐  │  │  │
 │  │  │  │   Domain Layer      │  │  │  │
 │  │  │  │  (Contracts, Types) │  │  │  │
@@ -35,19 +36,19 @@ The codebase is organized into concentric layers. Dependencies flow **inward** �
 
 ### Hexagonal Architecture (Ports & Adapters)
 
-- **Ports** — The `AIProvider` interface in `src/core/ai/types.ts`. This is the contract that all providers must implement.
-- **Adapters** — Each provider adapter (e.g., `OllamaProvider`) implements the port. Adapters translate between the generic core types and provider-specific HTTP payloads.
+- **Ports** — The `AIProvider` interface in `src/core/ai/types.ts`. This is the contract that all providers (Ollama, OpenAI, future Claude/Gemini) must implement.
+- **Adapters** — Each provider adapter (e.g., `OllamaProvider`, `OpenAIProvider`) implements the port. Adapters translate between the generic core types and provider-specific HTTP payloads.
 - The core never depends on adapters. Adapters depend on the core.
 
 ### Dependency Inversion
 
 High-level modules (Gateway, application logic) do not depend on low-level modules (HTTP calls, provider SDKs). Both depend on abstractions (`AIProvider` interface).
 
-The `AIGateway` receives an `AIRegistry` that contains `AIProvider` instances. It never imports `OllamaProvider`, `OpenAIProvider`, or any concrete class.
+The `AIGateway` receives a `ProviderRouter` that resolves models to `AIProvider` instances. It never imports `OllamaProvider`, `OpenAIProvider`, or any concrete class.
 
 ### Composition Root
 
-All dependencies are created and wired in exactly one file: `src/core/bootstrap.ts`.
+All dependencies are created and wired by the `createGateway()` factory in exactly one file: `src/core/bootstrap.ts`.
 
 - No singleton class
 - No dependency injection framework
@@ -60,14 +61,17 @@ Every provider adapter implements the same `AIProvider` interface:
 
 ```typescript
 interface AIProvider {
+  readonly id: ProviderId;
+  readonly name: string;
+  readonly models: ModelDescriptor[];
   chat(request: ChatRequest): Promise<ChatResponse>;
-  stream(request: ChatRequest): AsyncIterable<StreamChunk>;
+  stream(request: ChatRequest): AsyncIterable<StreamEvent>;
   embed(request: EmbeddingRequest): Promise<EmbeddingResponse>;
   health(): Promise<HealthStatus>;
 }
 ```
 
-The Gateway never references a concrete provider class. It looks up providers by ID from the registry and delegates to the interface.
+The Gateway never references a concrete provider class. Providers are registered in an `AIRegistry` and mapped to models in a `ModelRegistry`; the `ProviderRouter` resolves a model ID to the responsible provider instance.
 
 ---
 
@@ -76,40 +80,54 @@ The Gateway never references a concrete provider class. It looks up providers by
 ```
 stelaris-ai-core/
 ├── src/
+│   ├── index.ts                        ← Public API surface (single entry point)
 │   ├── core/                           ← Application Core (zero framework dependencies)
 │   │   ├── ai/
-│   │   │   ├── types.ts                ← AIProvider interface, ChatMessage, ChatRequest,
-│   │   │   │                              ChatResponse, StreamChunk, EmbeddingRequest,
-│   │   │   │                              EmbeddingResponse, HealthStatus, TokenUsage, etc.
+│   │   │   ├── types.ts                ← AIProvider interface, Message, ContentPart,
+│   │   │   │                              ChatRequest, ChatResponse, StreamEvent,
+│   │   │   │                              EmbeddingRequest, EmbeddingResponse, HealthStatus,
+│   │   │   │                              TokenUsage, ModelDescriptor, ModelCapabilities, etc.
 │   │   │   │                              Zero dependencies. Provider-agnostic. No defaults.
 │   │   │   ├── registry.ts             ← AIRegistry — lightweight provider catalog
+│   │   │   ├── model-registry.ts       ← ModelRegistry — model → provider mappings
+│   │   │   ├── provider-router.ts      ← ProviderRouter — resolves model IDs to providers
 │   │   │   └── gateway.ts              ← AIGateway — orchestration layer, provider-agnostic
 │   │   ├── config/
 │   │   │   └── config.ts               ← AppConfig, createConfig(). Only file that reads process.env.
-│   │   └── bootstrap.ts                ← Composition Root. Creates and wires all dependencies.
+│   │   ├── logging/
+│   │   │   ├── logger.ts               ← Logger interface, LogMetadata
+│   │   │   └── console-logger.ts       ← ConsoleLogger implementation
+│   │   └── bootstrap.ts                ← Composition Root. createGateway() wires all dependencies.
 │   │
-│   ├── infrastructure/                 ← Adapters (provider implementations)
-│   │   └── ai/
-│   │       └── ollama/
-│   │           └── provider.ts         ← Ollama HTTP API adapter. Implements AIProvider.
+│   ├── infrastructure/                 ← Adapters (provider implementations, HTTP helpers)
+│   │   ├── ai/
+│   │   │   ├── ollama/
+│   │   │   │   └── provider.ts         ← Ollama HTTP API adapter. Implements AIProvider.
+│   │   │   └── openai/
+│   │   │       └── provider.ts         ← OpenAI HTTP API adapter. Implements AIProvider.
+│   │   └── http/
+│   │       ├── fetch-with-timeout.ts   ← fetch wrapper with timeout
+│   │       └── fetch-with-retry.ts     ← fetch wrapper with retry
 │   │
-│   ├── app/                            ← Next.js App Router (framework layer)
-│   │   ├── api/chat/route.ts           ← HTTP route. Only handles HTTP, validation, serialization.
+│   └── ...
+│
+├── playground/                         ← Standalone Next.js demo app (separate package)
+│   ├── app/
+│   │   ├── api/chat/route.ts           ← HTTP route. Consumes @stelaris/ai-core.
 │   │   ├── layout.tsx
 │   │   ├── page.tsx
 │   │   └── globals.css
-│   │
-│   ├── config/                         ← Reserved for future configuration files
-│   ├── agents/                         ← Reserved for future AI agent implementations
-│   ├── components/                     ← React components (UI layer)
-│   ├── lib/                            ← Shared utility functions
-│   ├── prompts/                        ← Prompt templates
-│   ├── types/                          ← Shared TypeScript types (non-AI)
-│   └── utils/                          ← Utility helpers
+│   ├── package.json
+│   └── tsconfig.json
 │
-├── public/                             ← Static assets
+├── tests/
+│   ├── unit/                           ← Unit tests (registry, model-registry, provider-router, gateway, http)
+│   └── integration/                    ← Integration tests (ollama, openai providers)
+│
 ├── ARCHITECTURE.md                     ← This file
 ├── tsconfig.json
+├── tsup.config.ts                      ← Library build config
+├── vitest.config.ts                    ← Test runner config
 └── package.json
 ```
 
@@ -119,11 +137,10 @@ stelaris-ai-core/
 
 ### Core (`src/core/`) must never import:
 
-- **Next.js** — no `next/` imports, no `@/app/`, no framework types
-- **React** — no `react` imports, no JSX, no hooks
+- **Next.js / React** — no `next/` imports, no JSX, no hooks
 - **`fetch`** — the core orchestrates but does not perform HTTP calls
 - **`process.env`** — only `src/core/config/config.ts` reads environment variables
-- **Concrete provider classes** — the core depends on the `AIProvider` interface, not `OllamaProvider`
+- **Concrete provider classes** — the core depends on the `AIProvider` interface, not `OllamaProvider`/`OpenAIProvider`
 - **External HTTP libraries**
 
 ### Configuration (`src/core/config/config.ts`):
@@ -135,10 +152,10 @@ stelaris-ai-core/
 
 ### Composition Root (`src/core/bootstrap.ts`):
 
-- Is the **only** file where providers are instantiated
-- Is the **only** file where providers are registered in the registry
-- Creates dependencies in a strict order: Config → Registry → Providers → Gateway
-- Exports the wired dependencies as plain module-scoped variables
+- `createGateway()` is the **only** place where providers are instantiated and registered
+- Is the **only** place where model→provider mappings are registered
+- Creates dependencies in a strict order: Config → Logger → Registries → Providers → Model mappings → Router → Gateway
+- Only registers providers that are actually configured (e.g., Ollama needs a `baseUrl`, OpenAI needs an `apiKey`)
 
 ### Gateway:
 
@@ -146,7 +163,8 @@ stelaris-ai-core/
 - Must never import or reference `OllamaProvider`, `OpenAIProvider`, etc.
 - Must never read `process.env`
 - Must never perform `fetch` calls
-- Receives all dependencies through its constructor (`AppConfig`, `AIRegistry`)
+- Receives all dependencies through its constructor (`AppConfig`, `ProviderRouter`, `Logger`)
+- Determines the provider automatically from the `model` field of each request via `ProviderRouter`
 
 ### Providers:
 
@@ -155,14 +173,14 @@ stelaris-ai-core/
 - Must not be instantiated anywhere except `src/core/bootstrap.ts`
 - Must not be registered anywhere except `src/core/bootstrap.ts`
 
-### API Routes:
+### API Routes (in `playground/app/`):
 
+- The playground consumes the published library (`@stelaris/ai-core`) — it does not import internal source paths
 - Must only handle **HTTP, validation, and serialization**
 - Must not instantiate providers, registry, or gateway
 - Must not read `process.env`
 - Must not make direct `fetch` calls to AI servers
 - Must not contain provider-specific logic
-- Must import pre-wired dependencies from `@/core/bootstrap`
 
 ---
 
@@ -172,100 +190,111 @@ stelaris-ai-core/
 HTTP POST /api/chat { prompt: "Hello", model: "qwen3:8b" }
 │
 ▼
-src/app/api/chat/route.ts                    ← Route
+playground/app/api/chat/route.ts               ← Route (Next.js)
 │  - Validates HTTP payload
-│  - Converts to ChatRequest
-│  - Calls gateway.chat("ollama", request)
+│  - Converts to ChatRequest { model, messages }
+│  - Calls gateway.chat(request)  — no provider ID is passed
 │
 ▼
-src/core/ai/gateway.ts                       ← Gateway
-│  - Looks up "ollama" in the registry
+src/core/ai/gateway.ts                         ← Gateway
+│  - Resolves the provider from request.model via ProviderRouter
 │  - Delegates to provider.chat(request)
 │  - Wraps errors in GatewayError
 │
 ▼
-src/core/ai/registry.ts                      ← Registry
-│  - Returns the registered OllamaProvider instance
+src/core/ai/provider-router.ts                 ← Router
+│  - Looks up model → provider mapping in ModelRegistry
+│  - Returns the registered provider instance from AIRegistry
 │
 ▼
-src/infrastructure/ai/ollama/provider.ts     ← Provider Adapter
-│  - Transforms ChatRequest → Ollama HTTP payload
-│  - Calls POST /api/chat via native fetch
+src/infrastructure/ai/ollama/provider.ts       ← Provider Adapter
+│  - Transforms ChatRequest → provider-specific HTTP payload
+│  - Calls the provider API via fetch (with timeout/retry helpers)
 │  - Validates response shape
-│  - Transforms Ollama response → ChatResponse
+│  - Transforms provider response → ChatResponse
 │
 ▼
-Ollama Server (or any AI server)             ← External System
+Provider Server (Ollama, OpenAI, etc.)         ← External System
 │  - Processes the request
 │  - Returns completion / embeddings / health
 │
 ▼
 (Response flows back up the chain)
-HTTP 200 { reply: "Hello! How can I help?" }
+HTTP 200 { message, model, usage, finishReason, provider, latencyMs }
 ```
+
+Streaming follows the same path via `gateway.stream(request)`, yielding discriminated `StreamEvent` values (`text-delta`, `tool-call-delta`, `usage`, `finish`, `error`).
 
 ---
 
 ## Adding a New Provider
 
-Adding a provider (e.g., OpenAI, Claude, Gemini) requires changes to **exactly** the files listed below. No core files are modified.
+Adding a provider (e.g., Claude, Gemini) requires changes to **exactly** the files listed below. No existing core files are modified.
 
 ### Step 1: Add configuration type
 
 In `src/core/config/config.ts`:
 
 ```typescript
-export interface OpenAIConfig {
+export interface ClaudeConfig {
   readonly apiKey?: string;
 }
 ```
 
-Add the new config section to `AIConfig`:
+Add the new config section to `AIConfig` and read the env var in `createConfig()`:
 
 ```typescript
-export interface AIConfig {
-  readonly ollama: OllamaConfig;
-  readonly openai: OpenAIConfig;     // ← Add this
-  readonly claude: ClaudeConfig;
-  readonly gemini: GeminiConfig;
-}
-```
-
-Add the env var reader in `createConfig()`:
-
-```typescript
-openai: {
-  apiKey: process.env[ENV.OPENAI_API_KEY] || undefined,
+claude: {
+  apiKey: process.env[ENV.CLAUDE_API_KEY] || undefined,
 },
 ```
 
 ### Step 2: Create the provider adapter
 
-Create `src/infrastructure/ai/openai/provider.ts`:
+Create `src/infrastructure/ai/claude/provider.ts`:
 
 - Implement the `AIProvider` interface
-- Accept `OpenAIConfig` in the constructor
-- Use native `fetch` to call OpenAI's API
-- Translate between `ChatRequest`/`ChatResponse` and OpenAI's payload format
-- Keep all OpenAI-specific logic inside this file
+- Accept the config and a `Logger` in the constructor
+- Use the HTTP helpers (`fetchWithTimeout`, `fetchWithRetry`) to call the provider API
+- Translate between `ChatRequest`/`ChatResponse`/`StreamEvent` and the provider's payload format
+- Keep all provider-specific logic inside this file
 
 ### Step 3: Wire in the Composition Root
 
-In `src/core/bootstrap.ts`, add three lines:
+In `src/core/bootstrap.ts`, add:
 
 ```typescript
-import { OpenAIProvider } from "@/infrastructure/ai/openai/provider";
+import { ClaudeProvider } from "@/infrastructure/ai/claude/provider";
 
-const openai = new OpenAIProvider(config.ai.openai);
-registry.register(openai);
+if (config.ai.claude.apiKey) {
+  const claude = new ClaudeProvider(
+    {
+      ...config.ai.claude,
+      timeoutMs: config.ai.timeoutMs,
+      retryCount: config.ai.retryCount,
+    },
+    log,
+  );
+  registry.register(claude);
+}
+```
+
+Then register the model mappings:
+
+```typescript
+models.register("claude-sonnet-4" as ModelId, "claude" as ProviderId);
 ```
 
 ### Step 4: Use the provider
 
+The Gateway routes automatically — consumers just specify a model:
+
 ```typescript
-const response = await gateway.chat("openai", {
-  model: "gpt-4o",
-  messages: [...],
+const response = await gateway.chat({
+  model: "claude-sonnet-4",
+  messages: [
+    { role: "user", content: [{ type: "text", text: "Hello" }] },
+  ],
 });
 ```
 
@@ -274,7 +303,8 @@ const response = await gateway.chat("openai", {
 - `src/core/ai/types.ts` — contracts are already provider-agnostic
 - `src/core/ai/gateway.ts` — Gateway works with any registered provider automatically
 - `src/core/ai/registry.ts` — Registry is generic, no provider-specific changes
-- `src/app/api/chat/route.ts` — Route uses `gateway.chat(providerId, request)`, just change the provider ID
+- `src/core/ai/model-registry.ts` — mappings are registered in bootstrap only
+- `src/core/ai/provider-router.ts` — Router is generic, no provider-specific changes
 
 ---
 
@@ -285,7 +315,7 @@ const response = await gateway.chat("openai", {
 - **No hardcoded defaults** for configuration values. Throw meaningful errors instead.
 - **No fabricated values** in translation layers. If the source doesn't provide a value, preserve the absence.
 - **No silent fallbacks** in business logic. Fail explicitly.
-- **Module-scoped exports** over singletons. `bootstrap.ts` exports plain variables, not classes with static instances.
+- **Factory/function exports** over singletons. `bootstrap.ts` exports `createGateway()`, not a class with static instances.
 - **Branded string types** (`ProviderId`, `ModelId`) over enums for extensibility.
 
 ### File Organization
@@ -296,14 +326,16 @@ const response = await gateway.chat("openai", {
 
 ### Imports
 
-- Core modules use `@/` path alias (`@/core/ai/types`, `@/core/config/config`).
-- Infrastructure modules use `@/` path alias (`@/infrastructure/ai/ollama/provider`).
-- Never import from `@services/` — that alias is deprecated.
+- Core modules use the `@/` path alias (`@/core/ai/types`, `@/core/config/config`).
+- Infrastructure modules use the `@/` path alias (`@/infrastructure/ai/ollama/provider`).
+- The playground imports only from the published package (`@stelaris/ai-core`).
+- The `@services/` alias has been removed — do not reintroduce it.
 
 ### Error Handling
 
-- Provider adapters throw `OllamaAPIError` (or equivalent) for API errors.
-- The Gateway wraps all provider errors in `GatewayError` with the `providerId` and original `cause`.
+- Provider adapters throw provider-specific errors (e.g., `OllamaAPIError`, `OpenAIAPIError`).
+- The Gateway wraps all provider errors in `GatewayError` with the model and original `cause`.
+- The ProviderRouter throws `UnknownModelError` / `ProviderUnavailableError` for resolution failures.
 - Configuration errors throw `ConfigValidationError` with descriptive messages.
 
 ### Immutability
@@ -314,6 +346,15 @@ const response = await gateway.chat("openai", {
 
 ### Testing
 
-- Gateway accepts `AIRegistry` via constructor — inject a mock registry with fake providers.
+- Gateway accepts `ProviderRouter` via constructor — inject a router with fake providers.
 - Provider adapters accept config via constructor — inject test config pointing to a mock server.
-- Route accepts `Request` — test with standard `Request` objects, no mocking framework needed.
+- Tests live in `tests/unit/` and `tests/integration/`. Integration tests require a live provider or mock server.
+
+---
+
+## Build, Test, and Packaging
+
+- **Build**: `npm run build` runs `tsup`, emitting an ESM bundle + type declarations to `dist/`.
+- **Test**: `npm test` runs `vitest run` over `tests/**/*.test.ts`.
+- **Package**: `npm pack` runs `prepack` (build) and produces a `.tgz`. `dist/` and `*.tgz` are gitignored; build artifacts are never committed.
+- **Playground**: the Next.js app in `playground/` is a separate package that consumes the built/published `@stelaris/ai-core`.

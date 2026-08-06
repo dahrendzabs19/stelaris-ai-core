@@ -2,6 +2,21 @@
 
 import { useState } from "react";
 
+interface ChatResponseBody {
+  message?: {
+    content?: Array<{ type: string; text?: string }>;
+  };
+  error?: string;
+}
+
+function extractText(message: ChatResponseBody["message"]): string {
+  if (!message?.content) return "";
+  return message.content
+    .filter((part) => part.type === "text" && part.text)
+    .map((part) => part.text)
+    .join("");
+}
+
 export default function Home() {
   const [prompt, setPrompt] = useState("");
   const [answer, setAnswer] = useState("");
@@ -17,9 +32,14 @@ export default function Home() {
       }),
     });
 
-    const data = await response.json();
+    const data: ChatResponseBody = await response.json();
 
-    setAnswer(data.reply);
+    if (!response.ok || data.error) {
+      setAnswer(data.error ?? "An unexpected error occurred");
+      return;
+    }
+
+    setAnswer(extractText(data.message));
   }
 
   return (

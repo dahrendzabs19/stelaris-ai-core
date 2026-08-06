@@ -1,6 +1,11 @@
-import { createConfig } from "@/core/config/config";
-import { createGateway } from "@/core/bootstrap";
-import type { ContentPart, Message, ModelId, StreamEvent } from "@/core/ai/types";
+import {
+  createConfig,
+  createGateway,
+  type ContentPart,
+  type Message,
+  type ModelId,
+  type StreamEvent,
+} from "@stelaris/ai-core";
 
 // ----------------------------------------------------------------------------
 // Gateway Initialization

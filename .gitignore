@@ -39,3 +39,14 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# build output
+/dist/
+*.tgz
+
+# playground (standalone Next.js demo app)
+/playground/node_modules
+/playground/.next/
+/playground/out/
+/playground/next-env.d.ts
+/playground/*.tsbuildinfo
